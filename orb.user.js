@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         orb
 // @namespace    orb-floating
-// @version      1.8.5
+// @version      1.8.6
 // @description  悬浮球:翻页/记录/剪藏/翻译/对话 + 划词批注/划词/对话/搜索
 // @author       orb
 // @match        *://*/*
@@ -3279,6 +3279,7 @@ textarea:focus{border-color:#6a85ff;box-shadow:0 0 0 2px rgba(106,133,255,.18);}
             '<div class="hint">搜索词用 %s 占位</div>' +
           '</div>' +
         '</div>' +
+        '<div class="row" id="orb-import-row" style="display:none"><label class="lbl-top">粘贴配置 JSON</label><textarea data-act="import-area" placeholder="在此粘贴之前导出的配置 JSON…"></textarea><span class="btn primary" data-act="import-apply" style="margin-top:6px;">导入</span></div>' +
         '<div class="ftr"><span class="btn" data-act="config.export">导出</span><span class="btn" data-act="config.import">导入</span><span class="btn danger" data-act="reset">重置</span><span class="btn primary" data-act="save">保存</span></div>' +
       '</div>';
   }
@@ -3527,7 +3528,7 @@ textarea:focus{border-color:#6a85ff;box-shadow:0 0 0 2px rgba(106,133,255,.18);}
       if (act === 'config.import') {
         const applyImport = (txt) => {
           try {
-            if (!txt) throw new Error('empty');
+            if (!txt || !txt.trim()) throw new Error('empty');
             const obj = JSON.parse(txt);
             if (!obj || typeof obj !== 'object' || Array.isArray(obj)) throw new Error('bad');
             _deepMerge(Config.data, obj);
@@ -3536,39 +3537,36 @@ textarea:focus{border-color:#6a85ff;box-shadow:0 0 0 2px rgba(106,133,255,.18);}
             setTimeout(() => { Panel.close(); setTimeout(() => { try { Panel.open(); } catch (e) { /* ignore */ } }, 80); }, 600);
           } catch (e) { Toast.show('导入失败：不是有效配置 JSON', 3000, 'error'); }
         };
-        // 多行粘贴对话框（替代单行 prompt）
-        const showPasteDialog = () => {
-          const overlay = document.createElement('div');
-          overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.4);z-index:2147483646;display:flex;align-items:center;justify-content:center;';
-          const card = document.createElement('div');
-          card.style.cssText = 'background:#fff;border-radius:12px;padding:14px;width:min(92vw,520px);box-shadow:0 8px 30px rgba(0,0,0,.2);font-family:-apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif;';
-          card.innerHTML = '<div style="font-size:14px;font-weight:600;margin-bottom:8px;">粘贴配置 JSON</div>' +
-            '<textarea style="width:100%;height:200px;box-sizing:border-box;border:1px solid #ddd;border-radius:8px;padding:8px;font-size:12px;font-family:ui-monospace,Menlo,monospace;resize:vertical;outline:none;" placeholder="在此粘贴之前导出的配置 JSON…"></textarea>' +
-            '<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:10px;">' +
-            '<button data-b="cancel" style="padding:6px 14px;border:1px solid #ddd;border-radius:8px;background:#fff;cursor:pointer;font-size:13px;">取消</button>' +
-            '<button data-b="ok" style="padding:6px 14px;border:none;border-radius:8px;background:#5b6cff;color:#fff;cursor:pointer;font-size:13px;">导入</button>' +
-            '</div>';
-          overlay.appendChild(card);
-          document.body.appendChild(overlay);
-          const ta = card.querySelector('textarea');
-          setTimeout(() => ta.focus(), 0);
-          const close = () => overlay.remove();
-          card.querySelector('[data-b=cancel]').onclick = close;
-          overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
-          card.querySelector('[data-b=ok]').onclick = () => { close(); applyImport(ta.value); };
+        const showPasteRow = () => {
+          const row = root.querySelector('#orb-import-row');
+          if (row) { row.style.display = ''; const ta = root.querySelector('[data-act="import-area"]'); if (ta) setTimeout(() => ta.focus(), 0); }
         };
-        // 兼容路径：1) 现代 navigator.clipboard.readText；2) 失败/不支持 → 多行粘贴对话框
+        // 优先直接读剪贴板；失败则在面板内展开粘贴行
         let clipboardTried = false;
         try {
           if (typeof navigator !== 'undefined' && navigator.clipboard && typeof navigator.clipboard.readText === 'function') {
             clipboardTried = true;
             navigator.clipboard.readText().then((txt) => {
               if (txt && txt.trim()) applyImport(txt);
-              else showPasteDialog();
-            }).catch(showPasteDialog);
+              else showPasteRow();
+            }).catch(showPasteRow);
           }
         } catch (e) { clipboardTried = false; }
-        if (!clipboardTried) showPasteDialog();
+        if (!clipboardTried) showPasteRow();
+        return;
+      }
+      if (act === 'import-apply') {
+        const ta = root.querySelector('[data-act="import-area"]');
+        if (ta) {
+          try {
+            const obj = JSON.parse(ta.value);
+            if (!obj || typeof obj !== 'object' || Array.isArray(obj)) throw new Error('bad');
+            _deepMerge(Config.data, obj);
+            Config.save();
+            Toast.show('配置已导入，即将重开设置', 1500, 'success');
+            setTimeout(() => { Panel.close(); setTimeout(() => { try { Panel.open(); } catch (e) { /* ignore */ } }, 80); }, 600);
+          } catch (e) { Toast.show('导入失败：不是有效配置 JSON', 3000, 'error'); }
+        }
         return;
       }
       if (act === 'close' || act === 'cancel') {
