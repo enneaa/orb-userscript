@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         orb
 // @namespace    orb-floating
-// @version      1.7.3
+// @version      1.7.4
 // @description  悬浮球:翻页/记录/剪藏/翻译/对话 + 划词批注/划词/对话/搜索
 // @author       orb
 // @match        *://*/*
@@ -3161,7 +3161,7 @@ textarea:focus{border-color:#6a85ff;box-shadow:0 0 0 2px rgba(106,133,255,.18);}
 
   function renderPanelHTML() {
     const c = Config.data;
-    const varTags = ['title', 'url', 'hostname', 'author', 'excerpt', 'content', 'selection', 'comment', 'date', 'year', 'month', 'day', 'hour', 'minute'].map((v) =>
+    const varTags = ['title', 'url', 'hostname', 'author', 'excerpt', 'content', 'selection', 'comment', 'date', 'year', 'month', 'day', 'hour', 'minute', 'second'].map((v) =>
       '<span class="tag" data-act="insert-var" data-var="' + v + '">{{' + v + '}}</span>'
     ).join(' ');
     return '' +
