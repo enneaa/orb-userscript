@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         orb
 // @namespace    orb-floating
-// @version      1.7.4
+// @version      1.7.5
 // @description  悬浮球:翻页/记录/剪藏/翻译/对话 + 划词批注/划词/对话/搜索
 // @author       orb
 // @match        *://*/*
@@ -961,7 +961,8 @@
     _renderAll(parts) {
       const vars = parts.vars || {};
       const tpls = Config.data.notes.templates;
-      const front = Pure.templateRender(tpls.frontmatter, vars);
+      // 快速记录（note）不写 frontmatter，只存正文；剪藏/批注保留前言
+      const front = (parts.action === 'note') ? '' : Pure.templateRender(tpls.frontmatter, vars);
       const body = Pure.templateRender(parts.bodyTpl || tpls.clipBody, vars);
       const full = (front ? front + (front.endsWith('\n') ? '' : '\n') + '\n' : '') + body;
       return { frontmatter: front, body, full };
