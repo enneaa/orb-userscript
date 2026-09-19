@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         orb
 // @namespace    orb-floating
-// @version      1.8.7
+// @version      1.8.8
 // @description  悬浮球:翻页/记录/剪藏/翻译/对话 + 划词批注/划词/对话/搜索
 // @author       orb
 // @match        *://*/*
@@ -3669,6 +3669,12 @@ textarea:focus{border-color:#6a85ff;box-shadow:0 0 0 2px rgba(106,133,255,.18);}
     if (Config.data.translate && Config.data.translate.autoPage) {
       function autoPageTranslate() {
         try {
+          // 先读 <html lang="...">：若网页已声明为目标语系，跳过不翻；
+          // 未声明 lang（部分国内小站）则交给 PageTrans 内部逐块判断
+          const target = (Config.data.translate.target || 'zh').toLowerCase();
+          const norm = (l) => String(l || '').toLowerCase().split(/[-_]/)[0];
+          const pageLang = norm(document.documentElement && document.documentElement.lang);
+          if (pageLang && pageLang === norm(target)) return;
           if (!PageTrans.active) PageTrans.start().catch(() => {});
         } catch (e) { /* ignore */ }
       }
