@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         orb
 // @namespace    orb-floating
-// @version      1.7.1
+// @version      1.7.2
 // @description  悬浮球:翻页/记录/剪藏/翻译/对话 + 划词批注/划词/对话/搜索
 // @author       orb
 // @match        *://*/*
@@ -715,8 +715,7 @@
       templates: {
         frontmatter: '---\ntitle: {{title JSON}}\nurl: {{url}}\nhost: {{hostname}}\nauthor: {{author}}\ndate: {{date}}\ntags: [orb]\n---\n',
         clipBody: '# {{title}}\n\n> {{excerpt}}\n\n- 来源:{{url}}\n- 作者:{{author}}\n- 收录:{{date}}\n\n---\n\n{{content}}\n',
-        annotateBody: '# {{title}} 批注\n\n- 来源:{{url}}\n- 时间:{{date}}\n\n> {{selection}}\n\n{{#if comment}}> {{comment}}\n{{/if}}\n',
-        annotateSnippet: '> [!quote] {{title}}\n> {{selection}}\n>{{#if comment}} {{comment}}{{/if}}\n> — [link]({{url}})\n',
+        annotate: '# {{title}} 批注\n\n- 来源:{{url}}\n- 时间:{{date}}\n\n> {{selection}}\n\n{{#if comment}}> {{comment}}\n{{/if}}\n',
         noteBody: '# {{title}}\n\n{{#eachLine comment}}{{line}}\n{{/eachLine}}\n',
         // 保存路径（含文件名，支持 {{title}} 变量；记录/剪藏分开设置）
         paths: {
@@ -3087,11 +3086,8 @@ textarea:focus{border-color:#6a85ff;box-shadow:0 0 0 2px rgba(106,133,255,.18);}
                 excerpt: sel.slice(0, 160),
                 comment: comment || '',
               });
-              // choose template: full annotate if comment present, otherwise snippet
-              const bodyTpl = (comment && comment.trim())
-                ? Config.data.notes.templates.annotateBody
-                : Config.data.notes.templates.annotateSnippet;
-              await Services.Notes.save({ vars, bodyTpl, action: (comment && comment.trim()) ? 'annotate' : 'snippet' });
+              const bodyTpl = Config.data.notes.templates.annotate;
+              await Services.Notes.save({ vars, bodyTpl, action: 'annotate' });
               FloatBtn.setState('ok', 1500);
               Toast.show('已批注', 2000, 'success');
             } catch (e) {
@@ -3216,8 +3212,7 @@ textarea:focus{border-color:#6a85ff;box-shadow:0 0 0 2px rgba(106,133,255,.18);}
             '<div class="row"><label>变量</label>' + varTags + '</div>' +
             '<div class="row"><label class="lbl-top">前言模板</label><textarea data-act="notes.templates.frontmatter"></textarea></div>' +
             '<div class="row"><label class="lbl-top">剪藏正文</label><textarea data-act="notes.templates.clipBody"></textarea></div>' +
-            '<div class="row"><label class="lbl-top">批注正文</label><textarea data-act="notes.templates.annotateBody"></textarea></div>' +
-            '<div class="row"><label class="lbl-top">批注片段</label><textarea data-act="notes.templates.annotateSnippet"></textarea></div>' +
+            '<div class="row"><label class="lbl-top">批注模板</label><textarea data-act="notes.templates.annotate"></textarea></div>' +
             '<div class="row"><label class="lbl-top">记录</label><textarea data-act="notes.templates.noteBody"></textarea></div>' +
           '</div>' +
           // Translate
