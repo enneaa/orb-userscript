@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         orb
 // @namespace    orb-floating
-// @version      1.8.0
+// @version      1.8.1
 // @description  悬浮球:翻页/记录/剪藏/翻译/对话 + 划词批注/划词/对话/搜索
 // @author       orb
 // @match        *://*/*
@@ -3279,6 +3279,7 @@ textarea:focus{border-color:#6a85ff;box-shadow:0 0 0 2px rgba(106,133,255,.18);}
             '<div class="hint">搜索词用 %s 占位</div>' +
           '</div>' +
         '</div>' +
+        '<div class="row"><span class="btn" data-act="config.export">导出配置</span><span class="btn" data-act="config.import">导入配置</span><span class="hint">复制 JSON 到剪贴板 / 从剪贴板粘贴恢复</span></div>' +
         '<div class="ftr"><span class="btn danger" data-act="reset">重置默认</span><span class="btn" data-act="cancel">取消</span><span class="btn primary" data-act="save">保存</span></div>' +
       '</div>';
   }
@@ -3514,6 +3515,27 @@ textarea:focus{border-color:#6a85ff;box-shadow:0 0 0 2px rgba(106,133,255,.18);}
           focused.value = focused.value.slice(0, s) + ins + focused.value.slice(e);
           focused.focus();
         }
+        return;
+      }
+      if (act === 'config.export') {
+        try {
+          const txt = JSON.stringify(Config.data, null, 2);
+          if (typeof GM_setClipboard === 'function') GM_setClipboard(txt, 'text');
+          Toast.show('配置已复制到剪贴板', 2000, 'success');
+        } catch (e) { Toast.show('导出失败', 2000, 'error'); }
+        return;
+      }
+      if (act === 'config.import') {
+        try {
+          const txt = window.prompt('粘贴要导入的配置 JSON：', '');
+          if (!txt) return;
+          const obj = JSON.parse(txt);
+          if (!obj || typeof obj !== 'object' || Array.isArray(obj)) throw new Error('bad');
+          _deepMerge(Config.data, obj);
+          Config.save();
+          Toast.show('配置已导入，即将重开设置', 1500, 'success');
+          setTimeout(() => { Panel.close(); setTimeout(() => { try { Panel.open(); } catch (e) { /* ignore */ } }, 80); }, 600);
+        } catch (e) { Toast.show('导入失败：JSON 格式错误', 3000, 'error'); }
         return;
       }
       if (act === 'close' || act === 'cancel') {
