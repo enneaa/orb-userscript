@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         orb
 // @namespace    orb-floating
-// @version      1.8.1
+// @version      1.8.2
 // @description  悬浮球:翻页/记录/剪藏/翻译/对话 + 划词批注/划词/对话/搜索
 // @author       orb
 // @match        *://*/*
@@ -3526,16 +3526,27 @@ textarea:focus{border-color:#6a85ff;box-shadow:0 0 0 2px rgba(106,133,255,.18);}
         return;
       }
       if (act === 'config.import') {
-        try {
-          const txt = window.prompt('粘贴要导入的配置 JSON：', '');
-          if (!txt) return;
-          const obj = JSON.parse(txt);
-          if (!obj || typeof obj !== 'object' || Array.isArray(obj)) throw new Error('bad');
-          _deepMerge(Config.data, obj);
-          Config.save();
-          Toast.show('配置已导入，即将重开设置', 1500, 'success');
-          setTimeout(() => { Panel.close(); setTimeout(() => { try { Panel.open(); } catch (e) { /* ignore */ } }, 80); }, 600);
-        } catch (e) { Toast.show('导入失败：JSON 格式错误', 3000, 'error'); }
+        const applyImport = (txt) => {
+          try {
+            if (!txt) throw new Error('empty');
+            const obj = JSON.parse(txt);
+            if (!obj || typeof obj !== 'object' || Array.isArray(obj)) throw new Error('bad');
+            _deepMerge(Config.data, obj);
+            Config.save();
+            Toast.show('配置已导入，即将重开设置', 1500, 'success');
+            setTimeout(() => { Panel.close(); setTimeout(() => { try { Panel.open(); } catch (e) { /* ignore */ } }, 80); }, 600);
+          } catch (e) { Toast.show('导入失败：剪贴板不是有效配置 JSON', 3000, 'error'); }
+        };
+        // 优先直接读剪贴板；读不到（旧 WebView 权限拒绝）再兜底弹框粘贴
+        if (typeof navigator !== 'undefined' && navigator.clipboard && navigator.clipboard.readText) {
+          navigator.clipboard.readText().then(applyImport).catch(() => {
+            const txt = window.prompt('剪贴板读取失败，粘贴配置 JSON：', '');
+            if (txt) applyImport(txt);
+          });
+        } else {
+          const txt = window.prompt('粘贴配置 JSON：', '');
+          if (txt) applyImport(txt);
+        }
         return;
       }
       if (act === 'close' || act === 'cancel') {
