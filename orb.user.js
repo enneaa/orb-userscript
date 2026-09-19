@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         orb
 // @namespace    orb-floating
-// @version      1.7.5
+// @version      1.7.6
 // @description  悬浮球:翻页/记录/剪藏/翻译/对话 + 划词批注/划词/对话/搜索
 // @author       orb
 // @match        *://*/*
@@ -714,10 +714,10 @@
       gitee: { token: '', owner: '', repo: '', branch: 'master', folder: '' },
       webdav: { url: '', username: '', password: '' },
       templates: {
-        frontmatter: '---\ntitle: {{title JSON}}\nurl: {{url}}\nhost: {{hostname}}\nauthor: {{author}}\ndate: {{date}}\ntags: [orb]\n---\n',
-        clipBody: '# {{title}}\n\n> {{excerpt}}\n\n- 来源:{{url}}\n- 作者:{{author}}\n- 收录:{{date}}\n\n---\n\n{{content}}\n',
-        annotate: '# {{title}} 批注\n\n- 来源:{{url}}\n- 时间:{{date}}\n\n> {{selection}}\n\n{{#if comment}}> {{comment}}\n{{/if}}\n',
-        noteBody: '# {{title}}\n\n{{#eachLine comment}}{{line}}\n{{/eachLine}}\n',
+        frontmatter: '---\nsource: {{url}}\nhost: {{hostname}}\nauthor: {{author}}\ndate: {{date}}\ntype: [[剪藏]]\n---\n',
+        clipBody: '# {{title}}\n{{content}}\n',
+        annotate: '###### {{date}} {{hour}}:{{minute}}:{{second}}\n> {{selection}}\n{{#if comment}}{{comment}}\n{{/if}}\n',
+        noteBody: '###### {{date}} {{hour}}:{{minute}}:{{second}}\n{{#eachLine comment}}{{line}}\n{{/eachLine}}\n',
         // 保存路径（含文件名，支持 {{title}} 变量；记录/剪藏分开设置）
         paths: {
           note: { path: 'notes/{{title}}.md' },
