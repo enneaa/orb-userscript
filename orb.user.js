@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         orb
 // @namespace    orb-floating
-// @version      1.7.7
+// @version      1.7.8
 // @description  悬浮球:翻页/记录/剪藏/翻译/对话 + 划词批注/划词/对话/搜索
 // @author       orb
 // @match        *://*/*
@@ -716,7 +716,7 @@
       templates: {
         frontmatter: '---\nsource: {{url}}\nhost: {{hostname}}\nauthor: {{author}}\ndate: {{date}}\ntype: [[剪藏]]\n---\n\n',
         clipBody: '# {{title}}\n{{content}}\n\n',
-        annotate: '###### {{date}} {{hour}}:{{minute}}:{{second}}\n> {{selection}}\n{{#if comment}}{{comment}}\n{{/if}}\n\n',
+        annotate: '###### {{date}} {{hour}}:{{minute}}:{{second}}\n{{#eachLine selection}}{{line}}\n{{/eachLine}}\n{{#if comment}}{{comment}}\n{{/if}}\n\n',
         noteBody: '###### {{date}} {{hour}}:{{minute}}:{{second}}\n{{#eachLine comment}}{{line}}\n{{/eachLine}}\n\n',
         // 保存路径（含文件名，支持 {{title}} 变量；记录/剪藏分开设置）
         paths: {
