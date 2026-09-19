@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         orb
 // @namespace    orb-floating
-// @version      1.7.2
+// @version      1.7.3
 // @description  悬浮球:翻页/记录/剪藏/翻译/对话 + 划词批注/划词/对话/搜索
 // @author       orb
 // @match        *://*/*
@@ -127,11 +127,11 @@
   //   {{#if var}}...{{/if}}    - block; nested allowed
   //   {{#eachLine var}}...{{line}}...{{/eachLine}}
   // Whitelist: title, url, hostname, author, excerpt, content, selection, comment,
-  //            date, year, month, day, hour, minute
+  //            date, year, month, day, hour, minute, second
   const VAR_WHITELIST = new Set([
     'title', 'url', 'hostname', 'author', 'excerpt', 'content',
     'selection', 'context', 'comment',
-    'date', 'time', 'year', 'month', 'day', 'hour', 'minute',
+    'date', 'time', 'year', 'month', 'day', 'hour', 'minute', 'second',
     'lang', 'langName',
   ]);
 
@@ -326,6 +326,7 @@
       day: pad(now.getDate()),
       hour: pad(now.getHours()),
       minute: pad(now.getMinutes()),
+      second: pad(now.getSeconds()),
       lang: scope.lang || '',
       langName: scope.langName || '',
     };
