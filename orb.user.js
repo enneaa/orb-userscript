@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         orb
 // @namespace    orb-floating
-// @version      1.8.3
+// @version      1.8.4
 // @description  悬浮球:翻页/记录/剪藏/翻译/对话 + 划词批注/划词/对话/搜索
 // @author       orb
 // @match        *://*/*
@@ -3279,7 +3279,7 @@ textarea:focus{border-color:#6a85ff;box-shadow:0 0 0 2px rgba(106,133,255,.18);}
             '<div class="hint">搜索词用 %s 占位</div>' +
           '</div>' +
         '</div>' +
-        '<div class="ftr"><span class="btn" data-act="config.export">导出</span><span class="btn" data-act="config.import">导入</span><span class="btn danger" data-act="reset">重置</span><span class="btn" data-act="cancel">取消</span><span class="btn primary" data-act="save">保存</span></div>' +
+        '<div class="ftr"><span class="btn" data-act="config.export">导出</span><span class="btn" data-act="config.import">导入</span><span class="btn danger" data-act="reset">重置</span><span class="btn primary" data-act="save">保存</span></div>' +
       '</div>';
   }
 
