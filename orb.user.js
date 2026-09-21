@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         orb
 // @namespace    orb-floating
-// @version      1.8.9
+// @version      1.8.10
 // @description  悬浮球:翻页/记录/剪藏/翻译/对话 + 划词批注/划词/对话/搜索
 // @author       orb
 // @match        *://*/*
@@ -1827,6 +1827,10 @@ textarea:focus{border-color:#6a85ff;box-shadow:0 0 0 2px rgba(106,133,255,.18);}
     handle.style.touchAction = 'none';
     handle.addEventListener('pointerdown', (e) => {
       if (e.button !== 0) return;
+      // 标题栏内的交互元素（关闭/新建/复制等按钮、输入框、下拉等）不启动拖拽：
+      // 否则 setPointerCapture 会抢占 pointer 事件，移动端点击这些按钮时 click 不派发
+      const t = e.target;
+      if (t && t.closest && t.closest('button, a, input, textarea, select, [data-act], .rz, .icon-btn')) return;
       sx = e.clientX; sy = e.clientY;
       const r = wrap.getBoundingClientRect();
       ox = r.left; oy = r.top;
