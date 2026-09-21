@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         orb
 // @namespace    orb-floating
-// @version      1.8.10
+// @version      1.8.11
 // @description  悬浮球:翻页/记录/剪藏/翻译/对话 + 划词批注/划词/对话/搜索
 // @author       orb
 // @match        *://*/*
@@ -2545,7 +2545,7 @@ textarea:focus{border-color:#6a85ff;box-shadow:0 0 0 2px rgba(106,133,255,.18);}
         todo.push({ el: b, text: txt, parent: b.parentElement || null });
       }
       // 合并同父相邻短块 → 一次请求翻译多段（译文注入父容器末尾）
-      this.queue = this._group(todo);
+      this.queue = todo;   // 逐块翻译：译文注入各自段落下方（合并注入父容器末尾会让短段落译文堆到页面底部）
       this._qIdx = 0;   // 出队游标：替代 queue.shift() 的 O(n²)
       // start a worker pool
       const workers = [];
@@ -2557,35 +2557,6 @@ textarea:focus{border-color:#6a85ff;box-shadow:0 0 0 2px rgba(106,133,255,.18);}
         // （已翻译块带 dataset.orbTrans 标记，不会重复翻译）
         this.active = false;
       }
-    },
-    // 贪心合并：连续、同父、短块（≤150 字符）累计 ≤1000 合成一组；
-    // 译文注入父容器末尾，顺序按原文段落。父容器为 body/html 时不合并（避免译文落到页面底部）
-    _group(todo) {
-      const shortMax = 150, groupMax = 1000;
-      const out = [];
-      for (let i = 0; i < todo.length;) {
-        const cur = todo[i];
-        let j = i, total = cur.text.length;
-        const group = [cur];
-        const parent = cur.parent;
-        // 仅连续短块合并：首块或后续任一块超过短块阈值即断开（防止长块并入组导致译文位置错乱）
-        const canMerge = parent && parent.tagName !== 'BODY' && parent.tagName !== 'HTML' && cur.text.length <= shortMax;
-        while (canMerge && j + 1 < todo.length) {
-          const nx = todo[j + 1];
-          if (nx.parent !== parent) break;
-          if (nx.text.length > shortMax || total + nx.text.length > groupMax) break;
-          total += nx.text.length;
-          group.push(nx);
-          j++;
-        }
-        if (group.length >= 2) {
-          out.push({ el: parent, text: group.map((g) => g.text).join('\n'), merged: true });
-        } else {
-          out.push({ el: cur.el, text: cur.text });
-        }
-        i = j + 1;
-      }
-      return out;
     },
     async _worker(target) {
       while (!this.aborted) {
@@ -3675,7 +3646,7 @@ textarea:focus{border-color:#6a85ff;box-shadow:0 0 0 2px rgba(106,133,255,.18);}
         try {
           // 仅依据 <html lang="..."> 触发：未声明 lang 或与目标语系相同则跳过，不做逐块启发式判断
           const target = (Config.data.translate.target || 'zh').toLowerCase();
-          const norm = (l) => String(l || '').toLowerCase().split(/[-_]/)[0];
+          const norm = (l) => String(l || '').toLowerCase().split(/[,，;；]/)[0].split(/[-_]/)[0];
           const pageLang = norm(document.documentElement && document.documentElement.lang);
           if (!pageLang || pageLang === norm(target)) return;
           if (!PageTrans.active) PageTrans.start().catch(() => {});
