@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         orb
 // @namespace    orb-floating
-// @version      1.8.11
+// @version      2.1.0
 // @description  悬浮球:翻页/记录/剪藏/翻译/对话 + 划词批注/划词/对话/搜索
 // @author       orb
 // @match        *://*/*
@@ -11,6 +11,7 @@
 // @grant        GM_setClipboard
 // @grant        GM_registerMenuCommand
 // @grant        GM_deleteValue
+// @grant        GM_addValueChangeListener
 // @connect      *
 // @run-at       document-idle
 // @noframes
@@ -104,20 +105,20 @@
   // For an <img> node, walk lazy-load attribute candidates.
   Pure.resolveImgSrc = function resolveImgSrc(img) {
     if (!img) return '';
-    if (img.src && !img.src.startsWith('data:') && img.getAttribute('src')) {
-      // Use the literal attribute value so we catch lazy URLs.
-    }
     const attrs = ['data-src', 'data-lazy-src', 'data-original', 'data-url', 'data-image', 'data-hi-res-src'];
+    let v = '';
     for (const a of attrs) {
-      const v = img.getAttribute(a);
-      if (v && v.trim()) return v.trim();
+      const val = img.getAttribute(a);
+      if (val && val.trim()) { v = val.trim(); break; }
     }
-    const srcset = img.getAttribute('data-srcset') || img.getAttribute('srcset');
-    if (srcset) {
-      const first = srcset.split(',')[0].trim().split(/\s+/)[0];
-      if (first) return first;
+    if (!v) {
+      const srcset = img.getAttribute('data-srcset') || img.getAttribute('srcset');
+      if (srcset) v = srcset.split(',')[0].trim().split(/\s+/)[0] || '';
     }
-    return img.currentSrc || img.src || '';
+    if (!v) v = img.currentSrc || img.src || '';
+    // 协议相对 URL(//cdn.x/…)补全协议,避免剪藏后图片在笔记里失效
+    if (v.startsWith('//')) v = (typeof location !== 'undefined' ? location.protocol : 'https:') + v;
+    return v;
   };
 
   // ---- 1.6  Template engine ----
@@ -384,26 +385,36 @@
   };
   const _libLoaders = {};
   async function loadLib(name) {
-    if (_libLoaders[name] && _libLoaders[name].done) return true;
-    if (_libLoaders[name]) return _libLoaders[name];
+    // 已成功加载 → 直接返回;失败不缓存(允许下次重试),加载中共享同一 Promise
+    if (_libLoaders[name] && _libLoaders[name].done && _libLoaders[name].ok) return true;
+    if (_libLoaders[name] && !_libLoaders[name].done) return _libLoaders[name];
     const urls = LIB_CDNS[name] || [];
     const p = new Promise((resolve) => {
       let i = 0, settled = false;
-      const timer = setTimeout(() => { if (!settled) { settled = true; resolve(false); } }, 12000);
+      const settle = (ok) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        _libLoaders[name].done = true;
+        _libLoaders[name].ok = ok;
+        resolve(ok);
+      };
+      const timer = setTimeout(() => settle(false), 12000);
       const next = () => {
         if (settled) return;
-        if (i >= urls.length) { settled = true; clearTimeout(timer); resolve(false); return; }
+        if (i >= urls.length) { settle(false); return; }
         const s = document.createElement('script');
         s.src = urls[i++];
         s.async = true;
-        s.onload = () => { if (!settled) { settled = true; clearTimeout(timer); resolve(true); } };
+        s.onload = () => settle(true);
         s.onerror = () => { s.remove(); next(); };
         (document.head || document.documentElement).appendChild(s);
       };
       next();
     });
     _libLoaders[name] = p;
-    p.then(() => { _libLoaders[name].done = true; });
+    // 失败时清除缓存,下一次调用可重新尝试(网络恢复/CSP 变化场景)
+    p.then((ok) => { if (!ok) { try { delete _libLoaders[name]; } catch (e) { /* ignore */ } } });
     return p;
   }
   // 剪藏核心库(Readability + Turndown)就绪即返回 true;GFM 有 try/catch 兜底不强求。
@@ -417,7 +428,10 @@
   Pure.truncateByChars = function truncateByChars(s, n) {
     s = String(s == null ? '' : s);
     if (s.length <= n) return s;
-    return s.slice(0, n);
+    // 按码点截断,避免切裂代理对(emoji/生僻字)产生孤立代理符
+    const arr = Array.from(s);
+    if (arr.length <= n) return s;
+    return arr.slice(0, n).join('');
   };
 
   // ---- 1.11  轻量 Markdown 渲染(AI 回复用;零依赖;先转义后渲染,防注入) ----
@@ -488,7 +502,7 @@
     },
 
   Pure.escHtml = function escHtml(v) {
-    return String(v == null ? '' : v).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
+    return String(v == null ? '' : v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   };
   Pure.hash = function hash(s) {
     let h = 5381;
@@ -514,7 +528,8 @@
   Pure.friendlyError = function friendlyError(e) {
     const msg = String((e && e.message) || e || '');
     let out = msg;
-    if (/401|403/i.test(msg)) out = 'API Key 无效';
+    if (/^abort/i.test(msg)) out = '已停止';
+    else if (/401|403/i.test(msg)) out = 'API Key 无效';
     else if (/404/i.test(msg)) out = '接口地址错误';
     else if (/429/i.test(msg)) out = '请求过于频繁';
     else if (/500|502|503|504/i.test(msg)) out = '服务端错误';
@@ -1096,6 +1111,7 @@
         data: JSON.stringify([text]),
         responseType: 'text',
       });
+      if (r.status >= 400) throw new Error('edge: HTTP ' + r.status);
       let j = null;
       try { j = JSON.parse(r.responseText || ''); } catch (e) { /* ignore */ }
       if (!j || !j[0] || !j[0].translations || !j[0].translations[0]) {
@@ -1118,6 +1134,7 @@
         headers: { 'Content-Type': 'application/json', 'Origin': 'https://transmart.qq.com', 'Referer': 'https://transmart.qq.com/' },
         data: JSON.stringify(body), responseType: 'json',
       });
+      if (r.status >= 400) throw new Error('tencent: HTTP ' + r.status);
       const j = r.response || (r.responseText ? JSON.parse(r.responseText) : null);
       const t = (j && j.target && j.target.text_list && j.target.text_list[0]) ||
                 (j && j.auto_translation && j.auto_translation[0]) ||
@@ -1155,6 +1172,10 @@
         },
         data: this._aliBuildBody(from === 'auto' ? 'auto' : from, to, text),
       });
+      if (resp.status >= 400) {
+        this._aliToken = null;   // 可能是 csrf 过期,清掉以便下次重新鉴权
+        throw new Error('ali: HTTP ' + resp.status);
+      }
       let j = null;
       try { j = JSON.parse(resp.responseText || ''); } catch (e) { /* ignore */ }
       if (!j) throw new Error('ali: bad response');
@@ -1202,8 +1223,9 @@
     async oneShot(text, from, to) {
       if (Pure.shouldSkip(text, to)) return text;
       const p = Config.data.translate.provider;
-      // AI 内部还分 openai / anthropic，key 里带上以免混用译文
-      const key = this._cacheKey(text, p === 'ai' ? 'ai:' + ((Services.AI._resolve('translate') || {}).service || {}).name || 'ai' : p, to);
+      // AI 内部还分 openai / anthropic，key 里带上服务名以免混用译文
+      const aiName = (((Services.AI._resolve('translate') || {}).service || {}).name) || '';
+      const key = this._cacheKey(text, p === 'ai' ? 'ai:' + aiName : p, to);
       if (!this._cacheLoaded) this._loadCache();
       if (this._cache.has(key)) return this._cache.get(key);
       let out;
@@ -1269,12 +1291,28 @@
             if (chunk) handleLines(chunk, false);
           },
           onload(resp) {
+            // HTTP 层错误(401/403/429/5xx):SSE 不会触发 onerror,必须在此显式检查,
+            // 否则错误 JSON 被当成流内容静默丢弃,用户看到一个空回复。
+            const st = resp.status || 0;
+            if (st && (st < 200 || st >= 300)) {
+              let msg = 'HTTP ' + st;
+              try {
+                const ej = JSON.parse(resp.responseText || '');
+                const em = ej && (ej.error && (ej.error.message || ej.error.type) || ej.message);
+                if (em) msg += ': ' + em;
+              } catch (e) { /* ignore */ }
+              finish(new Error(msg));
+              return;
+            }
             if (resp.responseText && resp.responseText.length > buf.length) {
               handleLines(resp.responseText.slice(buf.length), true);
             } else if (pending) { handleLines('', true); }
             finish(null, '');
           },
-          onerror(e) { finish(new Error('AI stream error: ' + (e && e.error || 'unknown'))); },
+          onerror(e) {
+            const st = e && e.status;
+            finish(new Error('AI stream error: ' + (st ? 'HTTP ' + st : (e && e.error) || 'unknown')));
+          },
           ontimeout() { finish(new Error('AI stream timeout')); },
         });
         if (signal) signal.addEventListener('abort', () => finish(new Error('aborted')));
@@ -1300,9 +1338,11 @@
       const base = (baseURL || 'https://api.anthropic.com').replace(/\/+$/, '');
       const url = base.endsWith('/v1') ? base + '/messages' : base + '/v1/messages';
       const payload = {
-        model, system: system || '', messages,
+        model, messages,
         max_tokens: 2048, stream: true, temperature: 0.4,
       };
+      // 空 system 不发送(部分 Anthropic 兼容网关对空字符串校验严格)
+      if (system && String(system).trim()) payload.system = system;
       if (enableSearch) payload.tools = [{ type: 'web_search_20260209', name: 'web_search' }];
       return this._sseStream({
         url,
@@ -1443,7 +1483,15 @@
   .orb-trans-line{color:#9ca3af;}
 }
 
-.orb-sub:active{transform:scale(.92);}`;
+.orb-sub:active{transform:scale(.92);}
+/* hover 时始终显示名称标签(一次性引导提示之外,悬停仍可随时查看) */
+.orb-sub:hover .orb-lbl{opacity:1;}
+/* 键盘可达性:Tab 聚焦悬浮球/子球时有清晰可见的焦点环 */
+.orb-sub:focus-visible{outline:2px solid var(--orb-primary,#5b6cff);outline-offset:2px;}
+/* 无障碍:尊重系统"减弱动态效果"设置 */
+@media (prefers-reduced-motion: reduce){
+  .orb-sub,.orb-search-pop,.orb-search-pop .orb-eng{transition:none !important;animation:none !important;}
+}`;
 
   function injectGlobalStyles() {
     if (typeof document === 'undefined') return;
@@ -1506,7 +1554,14 @@ textarea.li-main{height:auto;min-height:56px;resize:vertical;line-height:1.5;}
 .card{--bg:#1b1e26;--bg2:#20242f;--bg3:#161922;--tx:#e6e8ee;--muted:#9aa1af;--bd:#2e333f;--hover:#262b36;--err:#ff8f8f;--err-bg:rgba(240,90,90,.16);box-shadow:0 16px 48px rgba(0,0,0,.5);}
 }
 
-.btn:active,.tag:active{transform:scale(.96);opacity:.85;}`;
+.btn:active,.tag:active{transform:scale(.96);opacity:.85;}
+/* 控件主题色统一(复选框/滑块跟随主色) */
+input[type=checkbox],input[type=range]{accent-color:var(--accent);}
+/* 键盘焦点可见性 */
+.btn:focus-visible,.tag:focus-visible{outline:2px solid var(--accent);outline-offset:2px;}
+@media (prefers-reduced-motion: reduce){
+  .btn,.tag,input,select,textarea{transition:none !important;}
+}`;
 
   const STYLE_INPUT = `
 :host{all:initial;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;color-scheme:light dark;}
@@ -1529,7 +1584,8 @@ textarea.li-main{height:auto;min-height:56px;resize:vertical;line-height:1.5;}
 .quote .q-body{font-size:12px;line-height:1.5;color:var(--muted);white-space:pre-wrap;word-wrap:break-word;}
 textarea{flex:1;min-height:80px;border:1px solid var(--bd);border-radius:8px;padding:7px 9px;font-size:13px;line-height:1.5;resize:vertical;font-family:inherit;background:var(--bg);color:var(--tx);outline:none;transition:border-color .15s,box-shadow .15s;}
 textarea:focus{border-color:var(--accent);box-shadow:0 0 0 2px rgba(91,108,255,.14);}
-.ftr{padding:8px 10px;display:flex;justify-content:flex-end;gap:8px;}
+.ftr{padding:8px 10px;display:flex;justify-content:flex-end;gap:8px;align-items:center;}
+.kbd-hint{margin-right:auto;font-size:11px;color:var(--muted);opacity:.8;user-select:none;}
 .ftr .b{padding:5px 12px;border:1px solid var(--bd);background:var(--bg);border-radius:8px;cursor:pointer;font-size:12px;font-family:inherit;color:var(--muted);transition:background-color .15s,border-color .15s,color .15s;}
 .ftr .b:hover{background:var(--hover);color:var(--tx);}
 .ftr .b.primary{background:var(--accent);border-color:var(--accent);color:#fff;}
@@ -1673,15 +1729,30 @@ textarea:focus{border-color:#6a85ff;box-shadow:0 0 0 2px rgba(106,133,255,.18);}
 
 
 
-.icon-btn:active,.pc:active,.mm-item:active{transform:scale(.96);opacity:.85;}`;
+.icon-btn:active,.pc:active,.mm-item:active{transform:scale(.96);opacity:.85;}
+/* 消息入场动画 */
+.row{animation:orb-row-in .18s ease;}
+@keyframes orb-row-in{from{opacity:0;transform:translateY(4px);}to{opacity:1;transform:none;}}
+/* 流式输出光标:生成中在气泡末尾闪烁,比纯文字更有"正在打字"的反馈 */
+.msg.assistant.streaming::after{content:"▍";color:var(--accent);animation:orb-blink 1s infinite;}
+/* 发送按钮空态禁用 */
+.send-btn:disabled{opacity:.45;cursor:default;pointer-events:none;}
+/* 欢迎页品牌图标 */
+.welcome .w-ico{width:44px;height:44px;border-radius:14px;background:linear-gradient(135deg,var(--accent),#8a5bff);display:grid;place-items:center;color:#fff;margin-bottom:8px;box-shadow:0 8px 20px rgba(91,108,255,.35);}
+.welcome .w-ico svg{width:22px;height:22px;}
+@media (prefers-reduced-motion: reduce){
+  .row{animation:none;}
+  .msg.assistant.pending::after,.msg.assistant.streaming::after{animation:none;}
+}`;
 
   const STYLE_TOAST = `
 :host{all:initial;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;}
-.t{position:fixed;top:24px;left:50%;transform:translateX(-50%) translateY(-4px);background:rgba(20,22,30,.92);color:#fff;padding:7px 14px;border-radius:999px;font-size:13px;opacity:0;transition:opacity .2s ease,transform .2s ease;z-index:2147483647;backdrop-filter:blur(6px);box-shadow:0 8px 24px rgba(0,0,0,.2);pointer-events:none;max-width:80vw;}
-.t.show{opacity:1;transform:translateX(-50%) translateY(0);}
+.t{position:fixed;top:24px;left:50%;transform:translateX(-50%) translateY(-8px) scale(.96);background:rgba(20,22,30,.92);color:#fff;padding:7px 14px;border-radius:999px;font-size:13px;opacity:0;transition:opacity .22s ease,transform .22s cubic-bezier(.2,.8,.2,1);z-index:2147483647;backdrop-filter:blur(6px);box-shadow:0 8px 24px rgba(0,0,0,.2);pointer-events:none;max-width:80vw;}
+.t.show{opacity:1;transform:translateX(-50%) translateY(0) scale(1);}
 .t.success{background:rgba(30,120,60,.92);}
 .t.error{background:rgba(180,40,40,.92);}
 .t.info{background:rgba(20,22,30,.92);}
+@media (prefers-reduced-motion: reduce){.t{transition:none;}}
 `;
 
   // (STYLE_TRANSLATE 已随划词面板删除 — 划词处理统一走对话面板 action 模式)
@@ -1731,9 +1802,17 @@ textarea:focus{border-color:#6a85ff;box-shadow:0 0 0 2px rgba(106,133,255,.18);}
       this.root = root;
       const wrap = document.createElement('div');
       wrap.className = 'wrap';
-      wrap.innerHTML = '<div class="hdr"><div class="t">记录</div><div class="actions"><button class="icon-btn x" data-act="close" title="关闭" aria-label="关闭"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg></button></div></div><div class="body"><div class="quote" style="display:none"><div class="q-body"></div></div><textarea placeholder="说点什么…"></textarea></div><div class="ftr"><span class="b" data-act="cancel">取消</span><span class="b primary" data-act="save">保存</span></div><div class="rz" data-act="rz" title="调整大小"></div>';
+      wrap.innerHTML = '<div class="hdr"><div class="t">记录</div><div class="actions"><button class="icon-btn x" data-act="close" title="关闭" aria-label="关闭"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg></button></div></div><div class="body"><div class="quote" style="display:none"><div class="q-body"></div></div><textarea placeholder="说点什么…"></textarea></div><div class="ftr"><span class="kbd-hint">Ctrl+Enter 保存</span><span class="b" data-act="cancel">取消</span><span class="b primary" data-act="save">保存</span></div><div class="rz" data-act="rz" title="调整大小"></div>';
       this.root.appendChild(wrap);
       (document.body || document.documentElement).appendChild(this.host);
+      // Ctrl/Cmd+Enter 快捷保存(委托到保存按钮,走统一的 open() 回调链路)
+      wrap.addEventListener('keydown', (ev) => {
+        if ((ev.ctrlKey || ev.metaKey) && ev.key === 'Enter') {
+          ev.preventDefault();
+          const saveBtn = wrap.querySelector('[data-act="save"]');
+          if (saveBtn) saveBtn.click();
+        }
+      });
       // 拖拽移动 + 调整大小（只绑一次；open/hide 不重绑不清理）
       const hdr0 = wrap.querySelector('.hdr');
       if (hdr0) this._cleanupDrag = makeDraggable(wrap, hdr0);
@@ -1776,7 +1855,8 @@ textarea:focus{border-color:#6a85ff;box-shadow:0 0 0 2px rgba(106,133,255,.18);}
         wrap.style.top = pos.y + 'px';
         this._cleanupKeyboard = Pure.keyboardAdapt(wrap);
       });
-      const close = () => { ta.value = ''; wrap.style.display = 'none'; };
+      // clear=true 时才丢弃草稿(保存成功);取消/关闭保留内容,下次同 trigger 打开可恢复
+      const close = (clear) => { if (clear) ta.value = ''; wrap.style.display = 'none'; };
       this._wrap = wrap; // 供 Esc 统一关闭
       const handler = (ev) => {
         // 用 closest 命中按钮：点击按钮内 SVG 图标时 target 是 path/svg，dataset 为空
@@ -1784,11 +1864,11 @@ textarea:focus{border-color:#6a85ff;box-shadow:0 0 0 2px rgba(106,133,255,.18);}
         if (!btn || !btn.dataset) return;
         const act = btn.dataset.act;
         if (act === 'close' || act === 'cancel') {
-          close();
+          close(false);
           onCancel && onCancel();
         } else if (act === 'save') {
           const v = ta.value;
-          close();
+          close(true);
           onSave && onSave(v);
         }
       };
@@ -1948,9 +2028,19 @@ textarea:focus{border-color:#6a85ff;box-shadow:0 0 0 2px rgba(106,133,255,.18);}
       // 欢迎页（参考脚本 tp-welcome）：空会话提示（action 模式不显示）
       const welcome = document.createElement('div');
       welcome.className = 'welcome';
-      welcome.innerHTML = '<div class="w-t">开始与 AI 对话吧！</div><div class="w-s">Enter 提交 · Shift+Enter 换行</div>';
+      welcome.innerHTML = '<div class="w-ico">' + Icons.chat + '</div><div class="w-t">开始与 AI 对话吧！</div><div class="w-s">Enter 提交 · Shift+Enter 换行 · Esc 关闭</div>';
       const escA = (v) => String(v == null ? '' : v).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
       const self = this;
+      // 智能滚动:用户上翻阅读历史时不强制回底;只有本来就在底部附近才跟随
+      const nearBottom = () => {
+        try { return body.scrollHeight - body.scrollTop - body.clientHeight < 90; }
+        catch (e) { return true; }
+      };
+      const scrollToEnd = () => { try { body.scrollTop = body.scrollHeight; } catch (e) { /* ignore */ } };
+      // 发送按钮空态禁用(生成中除外,生成中它是"停止"按钮)
+      const syncSendBtn = () => {
+        sendBtn.disabled = !sendBtn.classList.contains('stop') && !input.value.trim();
+      };
       // ---- 模型菜单（参考脚本 tp-model-menu）：只放服务/模型，提示词走胶囊条 ----
       function renderMm() {
         const services = (Config.data.ai && Config.data.ai.services) || [];
@@ -1996,6 +2086,8 @@ textarea:focus{border-color:#6a85ff;box-shadow:0 0 0 2px rgba(106,133,255,.18);}
         self._queue = [];
         self._turnText = {};
         self._aIdx = {};
+        self._uIdx = {};
+        self._turnSeq = 0;
         self._pendingContext = '';
         self._pendingEl = null;
         body.querySelectorAll('.row').forEach((r) => r.remove());
@@ -2020,7 +2112,7 @@ textarea:focus{border-color:#6a85ff;box-shadow:0 0 0 2px rgba(106,133,255,.18);}
           send();
         }
       });
-      input.addEventListener('input', autoGrow);
+      input.addEventListener('input', () => { autoGrow(); syncSendBtn(); });
       // 发送按钮：空闲=发送，生成中=停止（参考脚本 send/stop 切换）
       sendBtn.onclick = () => { if (sendBtn.classList.contains('stop')) stop(); else send(); };
       // 追加一条消息（参考脚本结构：meta 行 + 气泡 + hover 操作条），返回气泡元素供流式追加
@@ -2055,8 +2147,9 @@ textarea:focus{border-color:#6a85ff;box-shadow:0 0 0 2px rgba(106,133,255,.18);}
           row.appendChild(ops);
         }
         if (role !== 'system' && welcome && welcome.parentNode) welcome.remove();
+        const stick = nearBottom();   // 追加前判断:用户正看着底部才自动滚到底
         body.appendChild(row);
-        try { body.scrollTop = body.scrollHeight; } catch (e) { /* ignore */ }
+        if (stick) scrollToEnd();
         return bubble;
       }
       // 操作条事件委托：复制 / 重新生成 / 删除
@@ -2098,13 +2191,18 @@ textarea:focus{border-color:#6a85ff;box-shadow:0 0 0 2px rgba(106,133,255,.18);}
         bubble.appendChild(wrap2);
         ta.focus();
         wrap2.querySelector('[data-edit="save"]').onclick = () => {
-          bubble.textContent = ta.value;
+          const isAssistant = row.classList.contains('assistant');
+          if (isAssistant) bubble.innerHTML = Pure.md(ta.value);
+          else bubble.textContent = ta.value;
           const turn = Number(row.dataset.turn);
           const ai = self._aIdx[turn];
           if (ai != null && self.msgs[ai] && self.msgs[ai].role === 'assistant') self.msgs[ai].content = ta.value;
           Toast.show('已更新', 2000, 'success');
         };
-        wrap2.querySelector('[data-edit="cancel"]').onclick = () => { bubble.textContent = original; };
+        wrap2.querySelector('[data-edit="cancel"]').onclick = () => {
+          if (row.classList.contains('assistant')) bubble.innerHTML = Pure.md(original);
+          else bubble.textContent = original;
+        };
       }
       // 全部对话转 Markdown（参考 conversationToMarkdown）
       function conversationToMarkdown() {
@@ -2143,6 +2241,8 @@ textarea:focus{border-color:#6a85ff;box-shadow:0 0 0 2px rgba(106,133,255,.18);}
         self.msgs = [];
         self._turnText = {};
         self._aIdx = {};
+        self._uIdx = {};
+        self._turnSeq = 0;
         self._pendingEl = null;
         [...body.querySelectorAll('.row')].forEach((r) => r.remove());
       }
@@ -2197,11 +2297,19 @@ textarea:focus{border-color:#6a85ff;box-shadow:0 0 0 2px rgba(106,133,255,.18);}
         const turn = Number(row.dataset.turn);
         const orig = self._turnText[turn];
         if (!Number.isInteger(turn) || orig == null) return;
-        self.msgs = self.msgs.slice(0, turn + 1);
+        const uIdx = (self._uIdx || {})[turn];
+        if (uIdx == null) return;
+        const wasHidden = !!(self.msgs[uIdx] && self.msgs[uIdx].hidden);
+        // 截断到该轮 user 消息为止(不含),doSend 会重新 push 并重渲染用户气泡
+        self.msgs = self.msgs.slice(0, uIdx);
         [...body.querySelectorAll('.row')].forEach((r) => {
-          if (Number(r.dataset.turn) > turn) r.remove();
+          if (Number(r.dataset.turn) >= turn) r.remove();
         });
-        doSend(orig, { hiddenUser: !!(self.msgs[turn] && self.msgs[turn].hidden) });
+        // 清理被截掉的后续轮次索引,防止残留脏数据
+        for (const t of Object.keys(self._turnText)) {
+          if (Number(t) >= turn) { delete self._turnText[t]; delete self._aIdx[t]; delete self._uIdx[t]; }
+        }
+        doSend(orig, { hiddenUser: wasHidden });
       }
       // 删除最近一轮问答（参考 deleteMessage：删 assistant + 前一条 user）
       function deleteMsg(row) {
@@ -2211,12 +2319,14 @@ textarea:focus{border-color:#6a85ff;box-shadow:0 0 0 2px rgba(106,133,255,.18);}
         if (hasLater) { Toast.show('只能删除最近一轮'); return; }
         if (self.activeController) return;
         const aIdx = self._aIdx[turn];
-        self.msgs = self.msgs.filter((m, i) => !(i === turn && m.role === 'user') && !(aIdx != null && i === aIdx && m.role === 'assistant'));
+        const uIdx = (self._uIdx || {})[turn];
+        self.msgs = self.msgs.filter((m, i) => i !== uIdx && i !== aIdx);
         [...body.querySelectorAll('.row')].forEach((r) => {
           if (Number(r.dataset.turn) === turn) r.remove();
         });
         delete self._turnText[turn];
         delete self._aIdx[turn];
+        if (self._uIdx) delete self._uIdx[turn];
       }
       // 停止生成（参考 abortRequest）
       function stop() {
@@ -2226,6 +2336,7 @@ textarea:focus{border-color:#6a85ff;box-shadow:0 0 0 2px rgba(106,133,255,.18);}
         const a = self._pendingEl;
         if (a) {
           a.classList.remove('pending');
+          a.classList.remove('streaming');
           if (!a.textContent) a.textContent = '(已停止)';
         }
         finishTurn();
@@ -2237,8 +2348,11 @@ textarea:focus{border-color:#6a85ff;box-shadow:0 0 0 2px rgba(106,133,255,.18);}
         self._turnToken = (self._turnToken || 0) + 1;
         const myToken = self._turnToken;
         const include = ctxBtn.classList.contains('on');
-        // 构建 system 上下文：提示词预设 + 选中内容 + 网页正文（用户消息保持纯净）
-        const systemParts = [self._lastPreset || 'You are a helpful assistant.'];
+        // 构建 system 上下文：提示词预设(先渲染,避免 {{content}} 等占位符原样泄漏给 AI) + 选中内容 + 网页正文
+        const tplVars = Pure.getTemplateVars({ selection: text, pageContent: '' });
+        const presetRaw = self._lastPreset || 'You are a helpful assistant.';
+        const presetRendered = presetRaw.indexOf('{{') >= 0 ? Pure.templateRender(presetRaw, tplVars) : presetRaw;
+        const systemParts = [presetRendered];
         if (self._pendingContext) {
           systemParts.push('【选中内容】\n' + self._pendingContext);
           self._pendingContext = '';
@@ -2248,14 +2362,18 @@ textarea:focus{border-color:#6a85ff;box-shadow:0 0 0 2px rgba(106,133,255,.18);}
           if (ctx) systemParts.push('【网页正文】\n' + ctx);
         }
         const system = systemParts.join('\n\n');
-        const turn = self.msgs.length;
+        // 轮次键用自增序号(不能用 msgs.length:删除中间轮次后 length 复用会撞键)
+        const turn = (self._turnSeq = (self._turnSeq || 0) + 1);
         self.msgs.push({ role: 'user', content: text, hidden: !!opts.hiddenUser });
+        self._uIdx = self._uIdx || {};
+        self._uIdx[turn] = self.msgs.length - 1;
         self._turnText[turn] = text;
         self._seed = '';
         // 发送后清除胶囊激活态(system prompt 已应用到本轮,视觉上重置)
         try { presetBar.querySelectorAll('.pc').forEach((b) => b.classList.remove('active')); } catch (e) { /* ignore */ }
         const uRow = appendMsg('user', text, { hidden: !!opts.hiddenUser });
-        if (uRow) uRow.dataset.turn = turn;
+        // appendMsg 返回的是气泡 .msg;轮次号必须标在 .row 上(删除/重新生成按 .row 查询)
+        if (uRow && uRow.parentElement) uRow.parentElement.dataset.turn = turn;
         // sync "include page content" toggle back to Config (per-session override)
         if (!!include !== !!Config.data.ai.includePageContent) {
           Config.patch('ai.includePageContent', !!include);
@@ -2269,11 +2387,12 @@ textarea:focus{border-color:#6a85ff;box-shadow:0 0 0 2px rgba(106,133,255,.18);}
         sendBtn.classList.add('stop');
         sendBtn.innerHTML = ICON_STOP;
         sendBtn.title = '停止';
+        sendBtn.disabled = false;   // 生成中必须可点(此时它是"停止"按钮)
         // stream — use a fresh AbortController so close()/stop() can cancel mid-flight
         const controller = (typeof AbortController !== 'undefined') ? new AbortController() : null;
         self.activeController = controller;
-        // 历史裁剪：只发送最近 12 条消息
-        const history = self.msgs.slice(-12);
+        // 历史裁剪：只发送最近 12 条消息;剥掉 hidden 等内部字段,只发 API 认识的 role/content
+        const history = self.msgs.slice(-12).map((m) => ({ role: m.role, content: m.content }));
         let firstDelta = true;   // 去掉首块 delta 的前导空白（OpenAI 兼容服务常先发换行）
         Services.AI.chatStream({
           system,
@@ -2282,32 +2401,40 @@ textarea:focus{border-color:#6a85ff;box-shadow:0 0 0 2px rgba(106,133,255,.18);}
           onDelta: (d) => {
             if (self.aborted || myToken !== self._turnToken) return;
             if (a.classList.contains('pending')) { a.classList.remove('pending'); a.textContent = ''; }
+            a.classList.add('streaming');   // 流式光标
             if (firstDelta) { d = String(d == null ? '' : d).replace(/^\s+/, ''); firstDelta = false; }
             if (d) a.textContent += d;
             if (!scrollPending) {
               scrollPending = true;
               requestAnimationFrame(() => {
                 scrollPending = false;
-                try { body.scrollTop = body.scrollHeight; } catch (e) { /* ignore */ }
+                if (nearBottom()) scrollToEnd();   // 用户上翻时不拽回底部
               });
             }
           },
         }).then(() => {
           if (self.aborted || myToken !== self._turnToken) return;
           a.classList.remove('pending');
+          a.classList.remove('streaming');
           a.innerHTML = Pure.md(a.textContent);
           self.msgs.push({ role: 'assistant', content: a.textContent });
           self._aIdx[turn] = self.msgs.length - 1;
           finishTurn();
         }).catch((e) => {
           if (self.aborted || myToken !== self._turnToken) return;
+          const emsg = String((e && e.message) || e || '');
+          // 用户主动停止:stop() 已写好'(已停止)'并 finishTurn,这里不再覆盖为错误样式
+          if (/^abort/i.test(emsg)) { finishTurn(); return; }
           a.classList.remove('pending');
+          a.classList.remove('streaming');
           a.classList.add('err');
-          a.textContent = '[错误]' + (e && e.message || e);
+          a.textContent = '[错误]' + Pure.friendlyError(emsg);
           finishTurn();
         });
       }
       function finishTurn() {
+        // 幂等:stop() 与 promise catch 可能各调一次,第二次直接返回,避免队列被重复补发
+        if (!sendBtn.classList.contains('stop') && !self.activeController && !self._pendingEl) return;
         self.activeController = null;
         self._pendingEl = null;
         sendBtn.classList.remove('stop');
@@ -2320,7 +2447,9 @@ textarea:focus{border-color:#6a85ff;box-shadow:0 0 0 2px rgba(106,133,255,.18);}
           input.value = next;
           autoGrow();
           doSend(next);
+          return;
         }
+        syncSendBtn();
       }
       function send() {
         if (self.aborted) return;
@@ -2333,16 +2462,18 @@ textarea:focus{border-color:#6a85ff;box-shadow:0 0 0 2px rgba(106,133,255,.18);}
           Toast.show('已排队', 2000, 'info');
           input.value = '';
           autoGrow();
+          syncSendBtn();
           return;
         }
         input.value = '';
         autoGrow();
+        syncSendBtn();
         doSend(text);
       }
       // 暴露闭包给 open 复用（事件绑定保留在 _ensureBuilt 作用域内）
       this._wrap = wrap;
       this._built = true;
-      this._fns = { renderMm, hideMm, appendMsg, copyText, startEdit, conversationToMarkdown, renderPresetBar, resetConversation, renderTemplate, onPresetChip, autoGrow, regenerate, deleteMsg, stop, doSend, finishTurn, send };
+      this._fns = { renderMm, hideMm, appendMsg, copyText, startEdit, conversationToMarkdown, renderPresetBar, resetConversation, renderTemplate, onPresetChip, autoGrow, regenerate, deleteMsg, stop, doSend, finishTurn, send, syncSendBtn, nearBottom };
       this._el = { wrap, body, input, sendBtn, chipBtn, mm, ctxBtn, closeBtn, newBtn, copyAllBtn, welcome };
     },
     open(opts) {
@@ -2355,7 +2486,7 @@ textarea:focus{border-color:#6a85ff;box-shadow:0 0 0 2px rgba(106,133,255,.18);}
       this._ensureBuilt();
       const self = this;
       const { wrap, body, input, chipBtn, ctxBtn } = this._el;
-      const { renderMm, hideMm, appendMsg, renderPresetBar, autoGrow, onPresetChip } = this._fns;
+      const { renderMm, hideMm, appendMsg, renderPresetBar, autoGrow, onPresetChip, syncSendBtn } = this._fns;
       // ---- 每次 open 刷新运行态 ----
       this.aborted = false;
       this._queue = [];
@@ -2370,6 +2501,8 @@ textarea:focus{border-color:#6a85ff;box-shadow:0 0 0 2px rgba(106,133,255,.18);}
         this.msgs = [];
         this._turnText = {};
         this._aIdx = {};
+        this._uIdx = {};
+        this._turnSeq = 0;
         this._pendingContext = '';
       }
       this._seed = (mode === 'action') ? selSeed : '';  // chat 恢复时不用旧选区
@@ -2401,14 +2534,21 @@ textarea:focus{border-color:#6a85ff;box-shadow:0 0 0 2px rgba(106,133,255,.18);}
       }
       // 恢复历史消息渲染(chat 模式 close 后再 open 保留对话)
       if (this.msgs && this.msgs.length) {
+        // 恢复渲染:row.dataset.turn 必须回填自增轮次号(与 _uIdx/_aIdx 反向对应),
+        // 否则重新生成/删除在最近一轮上定位错误
+        this._uIdx = this._uIdx || {};
         this.msgs.forEach((m, idx) => {
           if (m.hidden) return;
-          const row = appendMsg(m.role, m.content);
-          if (!row) return;
-          if (m.role === 'user') row.dataset.turn = idx;
-          else {
+          const bubble = appendMsg(m.role, m.content);
+          const rowEl = bubble && bubble.parentElement;
+          if (!rowEl || !rowEl.classList.contains('row')) return;
+          if (m.role === 'user') {
+            for (const [t, ui] of Object.entries(this._uIdx)) {
+              if (Number(ui) === idx) { rowEl.dataset.turn = t; break; }
+            }
+          } else {
             for (const [t, ai] of Object.entries(this._aIdx || {})) {
-              if (Number(ai) === idx) { row.dataset.turn = t; break; }
+              if (Number(ai) === idx) { rowEl.dataset.turn = t; break; }
             }
           }
         });
@@ -2416,6 +2556,7 @@ textarea:focus{border-color:#6a85ff;box-shadow:0 0 0 2px rgba(106,133,255,.18);}
         body.appendChild(this._el.welcome);
       }
       autoGrow();
+      syncSendBtn();   // open 后输入框为空,发送按钮初始禁用
       // 传入 anchor(触发它的子球)时,窗口优先显示在子球左侧;未传则保持原位/居中。
       // 定位放 rAF：display 恢复后再测量尺寸（复用时 display 还是 none,同步测量 offsetWidth=0 会定位错乱）
       if (opts.anchor) {
@@ -2481,17 +2622,25 @@ textarea:focus{border-color:#6a85ff;box-shadow:0 0 0 2px rgba(106,133,255,.18);}
       return _articleCache;
     } catch (e) { return null; }
   }
+  // 正文 Markdown 缓存:同一页面多次取片段(预设渲染/system 构建/剪藏)不再重复 turndown
+  let _snippetCacheUrl = '';
+  let _snippetCacheText = '';
   function getPageSnippet(max) {
+    max = max || 20000;
     try {
-      const article = cachedArticle();
-      let text = '';
-      if (article && article.content && typeof TurndownService !== 'undefined') {
-        try { text = new TurndownService({ headingStyle: 'atx', codeBlockStyle: 'fenced' }).turndown(article.content); } catch (e) { /* ignore */ }
+      if (_snippetCacheUrl !== location.href) {
+        const article = cachedArticle();
+        let text = '';
+        if (article && article.content && typeof TurndownService !== 'undefined') {
+          try { text = new TurndownService({ headingStyle: 'atx', codeBlockStyle: 'fenced' }).turndown(article.content); } catch (e) { /* ignore */ }
+        }
+        if (!text) text = (article && article.textContent) || document.body.innerText || '';
+        _snippetCacheUrl = location.href;
+        _snippetCacheText = text;
       }
-      if (!text) text = (article && article.textContent) || document.body.innerText || '';
-      return Pure.truncateByChars(text, max || 20000);
+      return Pure.truncateByChars(_snippetCacheText, max);
     } catch (e) {
-      try { return Pure.truncateByChars(document.body.innerText || '', max || 20000); } catch (e2) { return ''; }
+      try { return Pure.truncateByChars(document.body.innerText || '', max); } catch (e2) { return ''; }
     }
   }
 
@@ -2504,20 +2653,33 @@ textarea:focus{border-color:#6a85ff;box-shadow:0 0 0 2px rgba(106,133,255,.18);}
     queue: [],
     concurrency: 6,
     processed: 0,
+    failed: 0,
+    translated: 0,
     aborted: false,
     _containerTags: new Set(['P', 'LI', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'BLOCKQUOTE', 'TD', 'TH', 'CAPTION', 'FIGCAPTION']),
-    _skipTags: new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEXTAREA', 'INPUT', 'CODE', 'PRE', 'KBD', 'SAMP', 'VAR', 'OPTION']),
+    _skipTags: new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEXTAREA', 'INPUT', 'CODE', 'PRE', 'KBD', 'SAMP', 'VAR', 'OPTION', 'A', 'BUTTON']),
+    // 元素是否有"直接文本节点"(≥2字符):大量站点正文是裸 div 直排文本,不在容器标签表里
+    _hasDirectText(node) {
+      for (const ch of node.childNodes) {
+        if (ch.nodeType === 3 && (ch.textContent || '').trim().length >= 2) return true;
+      }
+      return false;
+    },
     _walk(root) {
       // TreeWalker 原生遍历：替代手动递归（大页面扫描开销更低）
       const out = [];
+      const containerSel = [...this._containerTags].join(',');
       const acceptNode = (function (node) {
         if (this._skipTags.has(node.tagName)) return NodeFilter.FILTER_REJECT;   // 整棵子树跳过
         if (node.classList && (node.classList.contains('orb-skip') || node.classList.contains('orb-trans-block'))) return NodeFilter.FILTER_REJECT;
-        if (this._containerTags.has(node.tagName)) {
+        const isContainer = this._containerTags.has(node.tagName);
+        if (isContainer || this._hasDirectText(node)) {
+          // 非容器标签但内部还有容器后代 → 深入,让各容器分别翻译(避免译文整块堆在外层 div 末尾)
+          if (!isContainer && node.querySelector && node.querySelector(containerSel)) return NodeFilter.FILTER_ACCEPT;
           const txt = (node.textContent || '').trim();
           if (txt.length >= 2) {
             out.push(node);
-            return NodeFilter.FILTER_REJECT;   // 容器块文本已计入，不再深入子节点
+            return NodeFilter.FILTER_REJECT;   // 文本已计入，不再深入子节点
           }
         }
         return NodeFilter.FILTER_ACCEPT;
@@ -2526,42 +2688,82 @@ textarea:focus{border-color:#6a85ff;box-shadow:0 0 0 2px rgba(106,133,255,.18);}
       while (walker.nextNode()) { /* 收集在 acceptNode 中完成 */ }
       return out;
     },
-    async start() {
-      if (this.active) return;
-      this.active = true;
-      this.aborted = false;
-      this.processed = 0;
-      this.queue = [];
-      const target = Config.data.translate.target || 'zh';
-      const blocks = this._walk(document.body);
-      const todo = [];
+    // 收集 root 下待翻译块(初始扫描与 MutationObserver 增量共用)
+    _collect(root, target, out) {
+      const blocks = this._walk(root);
       for (const b of blocks) {
         if (b.dataset && b.dataset.orbTrans) continue;
-        if (b.dataset) b.dataset.orbTrans = '1';
-        b.classList.add('orb-trans-block');
-        // Skip if text already in target language
+        // Skip if text already in target language —— 跳过的块不打标,
+        // 之后切换目标语言重新翻译时仍可被收集
         const txt = (b.textContent || '').trim();
         if (Pure.shouldSkip(txt, target)) continue;
-        todo.push({ el: b, text: txt, parent: b.parentElement || null });
+        if (b.dataset) b.dataset.orbTrans = '1';
+        b.classList.add('orb-trans-block');
+        out.push({ el: b, text: txt, parent: b.parentElement || null });
       }
-      // 合并同父相邻短块 → 一次请求翻译多段（译文注入父容器末尾）
-      this.queue = todo;   // 逐块翻译：译文注入各自段落下方（合并注入父容器末尾会让短段落译文堆到页面底部）
-      this._qIdx = 0;   // 出队游标：替代 queue.shift() 的 O(n²)
-      // start a worker pool
+    },
+    // 启动/重启 worker 泵:首轮与 MutationObserver 增量共用;active 期间重入直接返回
+    _pump(target) {
+      if (this.aborted || this.active) return;
+      this.active = true;
+      const workers = [];
+      for (let i = 0; i < this.concurrency; i++) workers.push(this._worker(target));
+      Promise.all(workers).finally(() => { this.active = false; });
+    },
+    async start() {
+      if (this.active || (this.observer && !this.aborted)) return;
+      this.aborted = false;
+      this.processed = 0;
+      this.failed = 0;
+      this.translated = 0;
+      this.queue = [];
+      this._qIdx = 0;
+      const target = Config.data.translate.target || 'zh';
+      this._collect(document.body, target, this.queue);
+      // SPA 增量:监听 DOM 变化,新插入的内容去抖后收集并重启 worker 泵
+      this._obsTimer = null;
+      try {
+        this.observer = new MutationObserver((muts) => {
+          if (this.aborted) return;
+          // 忽略我们自己注入的译文行,避免自我触发死循环
+          for (const m of muts) {
+            for (const n of m.addedNodes) {
+              if (n && n.nodeType === 1 && n.classList && n.classList.contains('orb-trans-line')) return;
+            }
+          }
+          if (this._obsTimer) clearTimeout(this._obsTimer);
+          this._obsTimer = setTimeout(() => {
+            if (this.aborted) return;
+            this._collect(document.body, target, this.queue);
+            this._pump(target);   // 首轮 worker 可能已退出,有新增量时重启
+          }, 800);
+        });
+        this.observer.observe(document.body, { childList: true, subtree: true });
+      } catch (e) { this.observer = null; }
+      // 首轮:启动 worker 池并等待完成,再汇报统计
+      this.active = true;
       const workers = [];
       for (let i = 0; i < this.concurrency; i++) workers.push(this._worker(target));
       try {
         await Promise.all(workers);
       } finally {
-        // 完成后复位：再次 start() 可重新扫描 SPA 动态加载的新内容
-        // （已翻译块带 dataset.orbTrans 标记，不会重复翻译）
         this.active = false;
+        if (!this.aborted) {
+          const t = this.translated, f = this.failed;
+          if (t === 0 && f === 0) Toast.show('没有需要翻译的内容', 2000, 'info');
+          else Toast.show('翻译完成 ' + t + ' 段' + (f ? ',失败 ' + f + ' 段' : ''), 2500, f ? 'info' : 'success');
+        }
       }
     },
     async _worker(target) {
       while (!this.aborted) {
         const item = this.queue[this._qIdx++];
-        if (!item) break;
+        if (!item) {
+          // MutationObserver 可能随后补充新块:短暂等待再确认队列真的空了
+          await new Promise((r) => setTimeout(r, 300));
+          if (this._qIdx >= this.queue.length) break;
+          continue;
+        }
         const text = (item.text || '').trim();
         if (!text) continue;
         try {
@@ -2569,10 +2771,15 @@ textarea:focus{border-color:#6a85ff;box-shadow:0 0 0 2px rgba(106,133,255,.18);}
           // oneShot 内置缓存：取消后再翻译直接命中，不重复请求
           const tr = await Services.Translate.oneShot(Pure.truncateByChars(text, 1500), 'auto', target);
           if (this.aborted) return;
-          this._injectTranslation(item.el, tr);
+          if (tr && String(tr).trim()) {
+            this._injectTranslation(item.el, tr);
+            this.translated++;
+          }
         } catch (e) {
+          this.failed++;
           // soft-fail: a 429/rate-limit just skips this block, the next will retry
         }
+        this.processed++;
       }
     },
     _injectTranslation(b, translation) {
@@ -2587,6 +2794,8 @@ textarea:focus{border-color:#6a85ff;box-shadow:0 0 0 2px rgba(106,133,255,.18);}
     stop() {
       this.aborted = true;
       this.active = false;
+      if (this._obsTimer) { clearTimeout(this._obsTimer); this._obsTimer = null; }
+      if (this.observer) { try { this.observer.disconnect(); } catch (e) { /* ignore */ } this.observer = null; }
       // remove translations
       try {
         document.querySelectorAll('.orb-trans-line').forEach((n) => n.remove());
@@ -2607,6 +2816,8 @@ textarea:focus{border-color:#6a85ff;box-shadow:0 0 0 2px rgba(106,133,255,.18);}
       this.hide();
       this._trigger = 'search';
       this.host = document.createElement('div');
+      // 面板标记:selectionchange 检测时跳过(与其他面板宿主保持一致)
+      try { this.host.setAttribute('data-orb-panel', '1'); } catch (e) { /* ignore */ }
       const root = this.host;
       const style = document.createElement('style');
       // inner pop pulls CSS from STYLE_BALL_GLOBAL injected into head
@@ -2680,6 +2891,15 @@ textarea:focus{border-color:#6a85ff;box-shadow:0 0 0 2px rgba(106,133,255,.18);}
       this._topPct = (Config.data.ball && Config.data.ball.topPct) || 0.45;
       this._applyPos();
       this._bind();
+      // 窗口尺寸变化后重新钳位,防止球飞出可视区域
+      if (!this._resizeBound) {
+        this._resizeBound = true;
+        let rzTimer = null;
+        window.addEventListener('resize', () => {
+          if (rzTimer) clearTimeout(rzTimer);
+          rzTimer = setTimeout(() => { try { this._applyPos(); } catch (e) { /* ignore */ } }, 150);
+        });
+      }
     },
     _applyPos() {
       // 球永远贴右、不用 transform 偏移(避免影响 x() 与子球对齐);
@@ -2873,8 +3093,11 @@ textarea:focus{border-color:#6a85ff;box-shadow:0 0 0 2px rgba(106,133,255,.18);}
       // 展开态整体离右缘留 6px 间距(主球 fab-expanded 也左移 6px,二者对齐)
       const edgeGap = 6;
       // 第一个(最靠近主球)子球的 top edge: 主球上沿 - 子球高 - gap
-      const firstTop = ay - 16 - 32 - 8;   // = ay - 56
       const stepY = itemH + gap;
+      // 纵向钳位:主球靠近屏幕顶部时,整体下移,保证最顶上的子球不越出屏幕
+      let firstTop = ay - 16 - 32 - 8;   // = ay - 56
+      const minFirstTop = 8 + (defs.length - 1) * stepY;
+      if (firstTop < minFirstTop) firstTop = Math.min(minFirstTop, window.innerHeight - 40);
       defs.forEach((d, i) => {
         const el = document.createElement('div');
         el.className = 'orb-sub';
@@ -2981,32 +3204,23 @@ textarea:focus{border-color:#6a85ff;box-shadow:0 0 0 2px rgba(106,133,255,.18);}
       FloatBtn.setState('ok', 1200);
     },
     async note() {
-      await this._run('note', () => {
-        InputPanel.open({
-          title: '记录',
-          placeholder: '记录想法 / 速记 / TODO…',
-          trigger: 'note',
-          anchor: SubBalls.anchorOf('note') || { x: FloatBtn.x(), y: FloatBtn.y() },
-          onSave: async (text) => {
-            if (!text || !text.trim()) { clearBusy('note'); return; }
-            try {
-              const vars = Pure.getTemplateVars({
-                comment: text,
-                excerpt: (document.querySelector('meta[name=description]') || {}).content || '',
-                author: (document.querySelector('meta[name=author]') || {}).content || '',
-              });
-              await Services.Notes.save({ vars, bodyTpl: Config.data.notes.templates.noteBody, action: 'note' });
-              FloatBtn.setState('ok', 1500);
-              Toast.show('已保存', 2000, 'success');
-            } catch (e) {
-              FloatBtn.setState('err', 3000);
-              Pure.handleError(e);
-            } finally {
-              clearBusy('note');
-            }
-          },
-          onCancel: () => clearBusy('note'),
-        });
+      // busy 只在真正保存时持有:面板打开期间不阻塞剪藏/对话等其他动作
+      InputPanel.open({
+        title: '记录',
+        placeholder: '记录想法 / 速记 / TODO…',
+        trigger: 'note',
+        anchor: SubBalls.anchorOf('note') || { x: FloatBtn.x(), y: FloatBtn.y() },
+        onSave: async (text) => {
+          if (!text || !text.trim()) return;
+          await this._run('note', async () => {
+            const vars = Pure.getTemplateVars({
+              comment: text,
+              excerpt: (document.querySelector('meta[name=description]') || {}).content || '',
+              author: (document.querySelector('meta[name=author]') || {}).content || '',
+            });
+            await Services.Notes.save({ vars, bodyTpl: Config.data.notes.templates.noteBody, action: 'note' });
+          }, '已保存');
+        },
       });
     },
     async clip() {
@@ -3036,8 +3250,10 @@ textarea:focus{border-color:#6a85ff;box-shadow:0 0 0 2px rgba(106,133,255,.18);}
       }, '已剪藏');
     },
     async translatePage() {
-      if (PageTrans.active) { PageTrans.stop(); FloatBtn.setState('ok', 1200); Toast.show('已停止翻译'); return; }
-      await this._run('translate', () => PageTrans.start(), '翻译完成');
+      // active=首轮翻译中;observer 存活=增量监听中(首轮完成后 SPA 新内容仍会触发翻译)
+      if (PageTrans.active || PageTrans.observer) { PageTrans.stop(); FloatBtn.setState('ok', 1200); Toast.show('已停止翻译'); return; }
+      // 结果统计由 PageTrans 内部 toast,这里不再重复提示
+      await this._run('translate', () => PageTrans.start());
     },
     async openChat() {
       // If invoked from selection mode, seed the dialog with the selection
@@ -3049,33 +3265,24 @@ textarea:focus{border-color:#6a85ff;box-shadow:0 0 0 2px rgba(106,133,255,.18);}
     // --- Selection ---
     async annotate() {
       const sel = State.selectionText || '';
-      await this._run('annotate', () => {
-        InputPanel.open({
-          title: '批注',
-          placeholder: '可空 — 直接保存即可作为选区片段',
-          trigger: 'annotate',
-          quote: sel,
-          anchor: SubBalls.anchorOf('annotate') || { x: FloatBtn.x(), y: FloatBtn.y() },
-          onSave: async (comment) => {
-            try {
-              const vars = Pure.getTemplateVars({
-                selection: sel,
-                excerpt: sel.slice(0, 160),
-                comment: comment || '',
-              });
-              const bodyTpl = Config.data.notes.templates.annotate;
-              await Services.Notes.save({ vars, bodyTpl, action: 'annotate' });
-              FloatBtn.setState('ok', 1500);
-              Toast.show('已批注', 2000, 'success');
-            } catch (e) {
-              FloatBtn.setState('err', 3000);
-              Pure.handleError(e);
-            } finally {
-              clearBusy('annotate');
-            }
-          },
-          onCancel: () => clearBusy('annotate'),
-        });
+      // busy 只在真正保存时持有:面板打开期间不阻塞其他动作
+      InputPanel.open({
+        title: '批注',
+        placeholder: '可空 — 直接保存即可作为选区片段',
+        trigger: 'annotate',
+        quote: sel,
+        anchor: SubBalls.anchorOf('annotate') || { x: FloatBtn.x(), y: FloatBtn.y() },
+        onSave: async (comment) => {
+          await this._run('annotate', async () => {
+            const vars = Pure.getTemplateVars({
+              selection: sel,
+              excerpt: sel.slice(0, 160),
+              comment: comment || '',
+            });
+            const bodyTpl = Config.data.notes.templates.annotate;
+            await Services.Notes.save({ vars, bodyTpl, action: 'annotate' });
+          }, '已批注');
+        },
       });
     },
     async wordAction() {
@@ -3109,8 +3316,22 @@ textarea:focus{border-color:#6a85ff;box-shadow:0 0 0 2px rgba(106,133,255,.18);}
   // ============================================================
   const Panel = {
     host: null,
+    _snapshot: null,
+    _saved: false,
     close() {
       if (!this.host) return;
+      // 统一在 close 里做未保存回滚:点 X/取消/Esc 全局快捷键 都走这里,
+      // 避免 Esc 路径绕过快照恢复导致未保存修改泄漏进 Config.data
+      if (!this._saved && this._snapshot) {
+        try { Config.data = JSON.parse(JSON.stringify(this._snapshot)); } catch (e) { /* ignore */ }
+        // 滑块实时预览动过悬浮球,回滚后同步还原球位置
+        try {
+          FloatBtn._topPct = (Config.data.ball && Config.data.ball.topPct) || 0.45;
+          FloatBtn._applyPos();
+        } catch (e) { /* ignore */ }
+      }
+      this._snapshot = null;
+      this._saved = false;
       // 恢复背景滚动锁定（open 里改过 overflow）
       try { document.body.style.overflow = this._prevOverflow || ''; } catch (e) { /* ignore */ }
       this.host.remove();
@@ -3130,8 +3351,11 @@ textarea:focus{border-color:#6a85ff;box-shadow:0 0 0 2px rgba(106,133,255,.18);}
       const prevOverflow = document.body.style.overflow;
       document.body.style.overflow = 'hidden';
       this._prevOverflow = prevOverflow;
-      const _snapshot = JSON.parse(JSON.stringify(Config.data));
-      bindPanel(this.host, () => this.close(), _snapshot);
+      this._snapshot = JSON.parse(JSON.stringify(Config.data));
+      this._saved = false;
+      // 点击遮罩(卡片外)关闭,回滚逻辑统一走 close()
+      wrap.addEventListener('click', (e) => { if (e.target === wrap) this.close(); });
+      bindPanel(this.host, () => this.close());
     },
   };
 
@@ -3258,10 +3482,9 @@ textarea:focus{border-color:#6a85ff;box-shadow:0 0 0 2px rgba(106,133,255,.18);}
       '</div>';
   }
 
-  function bindPanel(host, onClose, snapshot) {
+  function bindPanel(host, onClose) {
     const root = host.shadowRoot;
     const c = Config.data;
-    let _saved = false;
     let lastFocusedTextarea = null;
     root.addEventListener('focusin', (e) => {
       if (e.target.tagName === 'TEXTAREA') lastFocusedTextarea = e.target;
@@ -3433,12 +3656,18 @@ textarea:focus{border-color:#6a85ff;box-shadow:0 0 0 2px rgba(106,133,255,.18);}
             const refs = [];
             if (Config.data.translate && Config.data.translate.aiService === svc.name) refs.push('翻译');
             if (Config.data.ai && Config.data.ai.chatService === svc.name) refs.push('AI对话');
-            if (refs.length) {
-              Toast.show('已删除 ' + svc.name, 2000, 'success');
+            if (Config.data.selection && Config.data.selection.aiService === svc.name) refs.push('划词');
+            Config.data.ai.services.splice(idx, 1);
+            // 引用该服务的模块回退到剩余服务中的第一个,避免静默指向不存在的服务名
+            const fallback = (Config.data.ai.services[0] || {}).name || '';
+            if (refs.length && fallback) {
+              if (Config.data.translate.aiService === svc.name) Config.data.translate.aiService = fallback;
+              if (Config.data.ai.chatService === svc.name) Config.data.ai.chatService = fallback;
+              if (Config.data.selection && Config.data.selection.aiService === svc.name) Config.data.selection.aiService = fallback;
             }
+            Toast.show('已删除 ' + svc.name + (refs.length ? '(' + refs.join('/') + ' 已回退到 ' + fallback + ')' : ''), 2500, 'success');
+            renderAiServices(root);
           }
-          Config.data.ai.services.splice(idx, 1);
-          renderAiServices(root);
         }
         return;
       }
@@ -3507,6 +3736,9 @@ textarea:focus{border-color:#6a85ff;box-shadow:0 0 0 2px rgba(106,133,255,.18);}
             if (!obj || typeof obj !== 'object' || Array.isArray(obj)) throw new Error('bad');
             _deepMerge(Config.data, obj);
             Config.save();
+            Panel._saved = true;   // 导入即生效,防止 close 时快照回滚把导入的配置冲掉
+            // 导入可能影响悬浮球位置,立即同步
+            try { FloatBtn._topPct = (Config.data.ball && Config.data.ball.topPct) || 0.45; FloatBtn._applyPos(); } catch (e) { /* ignore */ }
             Toast.show('配置已导入，即将重开设置', 1500, 'success');
             setTimeout(() => { Panel.close(); setTimeout(() => { try { Panel.open(); } catch (e) { /* ignore */ } }, 80); }, 600);
           } catch (e) { Toast.show('导入失败：不是有效配置 JSON', 3000, 'error'); }
@@ -3527,12 +3759,13 @@ textarea:focus{border-color:#6a85ff;box-shadow:0 0 0 2px rgba(106,133,255,.18);}
         return;
       }
       if (act === 'close' || act === 'cancel') {
-        if (!_saved && snapshot) { try { Config.data = JSON.parse(JSON.stringify(snapshot)); } catch (e) { /* ignore */ } }
+        // 回滚统一由 Panel.close() 处理(含 Esc 路径)
         onClose();
       }
       else if (act === 'reset') {
         if (confirm('重置所有设置为默认值?')) {
           Config.reset();
+          Panel._saved = true;   // 重置即生效,防止 close 时快照回滚把重置冲掉
           onClose();
           setTimeout(() => Panel.open(), 50);
         }
@@ -3596,7 +3829,7 @@ textarea:focus{border-color:#6a85ff;box-shadow:0 0 0 2px rgba(106,133,255,.18);}
         if (!c.ai) c.ai = {};
         c.ai.presets = presets2;
         Config.save();
-        _saved = true;
+        Panel._saved = true;
         Toast.show('已保存', 2000, 'success');
         onClose();
       }
@@ -3615,6 +3848,23 @@ textarea:focus{border-color:#6a85ff;box-shadow:0 0 0 2px rgba(106,133,255,.18);}
     if (typeof document === 'undefined') return;
     try {
     Config.load();
+    // 多标签页配置同步:另一个标签页改了配置,本页配置面板未打开时静默合并最新值
+    if (typeof GM_addValueChangeListener === 'function') {
+      try {
+        GM_addValueChangeListener('orb::config', (k, oldV, newV, remote) => {
+          if (!remote) return;
+          if (Panel.host) return;   // 设置面板打开时不覆盖,避免打断正在编辑的内容
+          try {
+            const stored = typeof newV === 'string' ? JSON.parse(newV) : newV;
+            if (stored && typeof stored === 'object') {
+              const data = JSON.parse(JSON.stringify(DEFAULT_CONFIG));
+              _deepMerge(data, stored);
+              Config.data = data;
+            }
+          } catch (e) { /* ignore */ }
+        });
+      } catch (e) { /* ignore */ }
+    }
     injectGlobalStyles();   // .sub, .search-pop, .orb-trans-line live in document.body
     FloatBtn.ensure();
     SubBalls.initSelectionWatch();
