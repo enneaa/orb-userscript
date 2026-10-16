@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         orb
 // @namespace    orb-floating
-// @version      2.1.4
+// @version      2.1.5
 // @description  悬浮球:翻页/记录/剪藏/翻译/对话 + 划词批注/划词/对话/搜索
 // @author       orb
 // @match        *://*/*
@@ -3763,7 +3763,8 @@ textarea:focus{border-color:#6a85ff;box-shadow:0 0 0 2px rgba(106,133,255,.18);}
     });
     root.addEventListener('click', (ev) => {
       // 用 closest 命中按钮（设置面板按钮内嵌 SVG 图标时 target 是 path/svg）
-      const t = ev.target && ev.target.closest ? ev.target.closest('[data-act]') : null;
+      // 命中 data-act 按钮；删除类按钮（AI 服务/搜索引擎/提示词）用各自 data-* 属性，需一并匹配
+      const t = ev.target && ev.target.closest ? ev.target.closest('[data-act],[data-ai],[data-se],[data-pre]') : null;
       if (!t || !t.dataset) return;
       const act = t.dataset.act;
       if (t.dataset.ai === 'remove') {
