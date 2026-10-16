@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         orb
 // @namespace    orb-floating
-// @version      2.1.2
+// @version      2.1.3
 // @description  悬浮球:翻页/记录/剪藏/翻译/对话 + 划词批注/划词/对话/搜索
 // @author       orb
 // @match        *://*/*
@@ -729,6 +729,8 @@
       gitee: { token: '', owner: '', repo: '', branch: 'master', folder: '' },
       webdav: { url: '', username: '', password: '' },
       dida: { token: '', projectId: '', projectName: '' },
+      services: [],                 // 保存服务列表 [{name,provider}]；空=退回 provider 字段
+      defaultService: '',           // 默认保存服务名（记录/批注/快速保存用）
       templates: {
         frontmatter: '---\nsource: {{url}}\nhost: {{hostname}}\nauthor: {{author}}\ndate: {{date}}\ntype:\n  - "[[剪藏]]"\n---\n\n',
         clipBody: '# {{title}}\n\n{{content}}\n\n',
@@ -984,9 +986,24 @@
       const full = (front ? front + (front.endsWith('\n') ? '' : '\n') + '\n' : '') + body;
       return { frontmatter: front, body, full };
     },
-    async save(parts) {
-      const p = Config.data.notes;
-      const provider = p.provider;
+    // 已配置的保存服务列表；未配置时退回单服务（provider 字段）
+    _services() {
+      const s = Config.data.notes.services;
+      if (Array.isArray(s) && s.length) return s.slice();
+      return [{ name: '默认', provider: Config.data.notes.provider || 'github' }];
+    },
+    // 默认保存服务：defaultService 匹配项，否则列表第一项
+    _defaultSvc() {
+      const svcs = this._services();
+      const d = Config.data.notes.defaultService;
+      return svcs.find((x) => x.name === d) || svcs[0] || null;
+    },
+    _defaultProvider() {
+      const s = this._defaultSvc();
+      return (s && s.provider) || Config.data.notes.provider || 'github';
+    },
+    async save(parts, targetProvider) {
+      const provider = targetProvider || this._defaultProvider();
       if (provider === 'obsidian') return this._saveObsidian(parts);
       if (provider === 'github')   return this._saveGitHub(parts, 'github');
       if (provider === 'gitee')    return this._saveGitHub(parts, 'gitee');
@@ -2888,6 +2905,48 @@ textarea:focus{border-color:#6a85ff;box-shadow:0 0 0 2px rgba(106,133,255,.18);}
   };
 
   // ============================================================
+  // §18.5  SAVE POP  (multi-service picker, reuses search-pop style)
+  // ============================================================
+  const SavePop = {
+    host: null,
+    show(anchor, services, onPick) {
+      this.hide();
+      this.host = document.createElement('div');
+      try { this.host.setAttribute('data-orb-panel', '1'); } catch (e) { /* ignore */ }
+      const pop = document.createElement('div');
+      pop.className = 'orb-search-pop';
+      services.forEach((s) => {
+        const d = document.createElement('div');
+        d.className = 'orb-eng';
+        d.textContent = (s.name || '?').charAt(0).toUpperCase();
+        d.title = s.name;
+        d.setAttribute('role', 'button');
+        d.setAttribute('aria-label', '保存到 ' + s.name);
+        d.onclick = () => { this.hide(); if (onPick) onPick(s); };
+        pop.appendChild(d);
+      });
+      this.host.appendChild(pop);
+      (document.body || document.documentElement).appendChild(this.host);
+      this._cleanupOutside = Pure.outsideClick(this.host, () => this.hide());
+      const ax = anchor.x, ay = anchor.y;
+      requestAnimationFrame(() => {
+        const w = pop.offsetWidth, h = pop.offsetHeight;
+        let tx = ax - 8 - w;
+        if (tx < 8) tx = ax + 36;
+        tx = Math.max(8, Math.min(FloatBtn.panelMaxRight() - w, tx));
+        const ty = Math.max(8, Math.min(window.innerHeight - h - 8, ay - h / 2));
+        pop.style.left = tx + 'px';
+        pop.style.top = ty + 'px';
+        pop.classList.add('show');
+      });
+    },
+    hide() {
+      if (this._cleanupOutside) { this._cleanupOutside(); this._cleanupOutside = null; }
+      if (this.host) { this.host.remove(); this.host = null; }
+    },
+  };
+
+  // ============================================================
   // §19  FLOAT BTN  (the 32px ball)
   // ============================================================
   const FloatBtn = {
@@ -3246,7 +3305,7 @@ textarea:focus{border-color:#6a85ff;box-shadow:0 0 0 2px rgba(106,133,255,.18);}
         },
       });
     },
-    async clip() {
+    async _clipTo(provider) {
       await this._run('clip', async () => {
         await ensureClipLibs();   // 首次剪藏先拉取 Readability/Turndown;失败则走降级
         const article = cachedArticle();
@@ -3269,8 +3328,14 @@ textarea:focus{border-color:#6a85ff;box-shadow:0 0 0 2px rgba(106,133,255,.18);}
         if ((vars.content || '').replace(/\s|<[^>]+>/g, '').length < 50) {
           throw new Error('此页面无法提取正文（非文章页？）');
         }
-        await Services.Notes.save({ vars, bodyTpl: Config.data.notes.templates.clipBody, action: 'clip' });
+        await Services.Notes.save({ vars, bodyTpl: Config.data.notes.templates.clipBody, action: 'clip' }, provider);
       }, '已剪藏');
+    },
+    async clip() {
+      const svcs = Services.Notes._services();
+      if (svcs.length <= 1) { await this._clipTo(svcs[0].provider); return; }
+      // 多个保存服务：弹出选择器（与搜索一致），点选目标服务保存
+      SavePop.show(SubBalls.anchorOf('clip') || { x: FloatBtn.x(), y: FloatBtn.y() }, svcs, (svc) => { this._clipTo(svc.provider); });
     },
     async translatePage() {
       // active=首轮翻译中;observer 存活=增量监听中(首轮完成后 SPA 新内容仍会触发翻译)
@@ -3419,18 +3484,28 @@ textarea:focus{border-color:#6a85ff;box-shadow:0 0 0 2px rgba(106,133,255,.18);}
           '</div>' +
           // Notes
           '<div class="section"><h4>笔记保存</h4>' +
-            '<div class="row"><label>服务</label><select data-act="notes.provider">' +
-              '<option value="obsidian">Obsidian (URI + 剪贴板)</option>' +
-              '<option value="github">GitHub</option>' +
-              '<option value="gitee">Gitee</option>' +
-              '<option value="webdav">WebDAV</option>' +
-              '<option value="dida">滴答清单 (DIDA)</option>' +
-            '</select></div>' +
-            '<div data-section="obsidian"><div class="row"><label>Vault</label><input type=text data-act="notes.obsidian.vault"></div></div>' +
-            '<div data-section="github"><div class="row"><label>Token</label><input type=password data-act="notes.github.token"></div><div class="row"><label>Owner</label><input type=text data-act="notes.github.owner"></div><div class="row"><label>Repo</label><input type=text data-act="notes.github.repo"></div><div class="row"><label>Branch</label><input type=text data-act="notes.github.branch"></div></div>' +
-            '<div data-section="gitee"><div class="row"><label>Token</label><input type=password data-act="notes.gitee.token"></div><div class="row"><label>Owner</label><input type=text data-act="notes.gitee.owner"></div><div class="row"><label>Repo</label><input type=text data-act="notes.gitee.repo"></div><div class="row"><label>Branch</label><input type=text data-act="notes.gitee.branch"></div></div>' +
-            '<div data-section="webdav"><div class="row"><label>地址</label><input type=text data-act="notes.webdav.url" placeholder="https://dav.example.com"></div><div class="row"><label>用户名</label><input type=text data-act="notes.webdav.username"></div><div class="row"><label>密码</label><input type=password data-act="notes.webdav.password"></div></div>' +
-            '<div data-section="dida"><div class="row"><label class="lbl-top">API 口令</label><input type=password data-act="notes.dida.token" placeholder="网页版滴答清单 → 设置 → 账户与安全 → API 口令"></div><div class="row"><label class="lbl-top">目标清单</label><span style="flex:1;display:flex;align-items:center;gap:6px;"><select id="sel-dida-project" data-act="dida.project" style="flex:1;"><option value="">— 未选择 —</option></select><span class="btn" data-act="dida.refresh">获取清单</span></span></div><div class="hint">选择目标清单（按文件夹分组）；不选则保存到收件箱</div></div>' +
+            '<div class="row"><label class="lbl-top">保存服务</label><span style="flex:1;display:flex;flex-direction:column;gap:6px;">' +
+              '<span id="save-svc-list" style="display:flex;flex-direction:column;gap:6px;"></span>' +
+              '<span class="btn" data-act="save.add" style="align-self:flex-start;">添加服务</span>' +
+            '</span></div>' +
+            '<div class="row"><label>默认服务</label><select data-act="notes.defaultService" id="sel-save-default"></select><span class="hint">记录/批注/快速保存使用；剪藏时可选其他</span></div>' +
+            '<details style="margin:4px 0 10px;"><summary style="cursor:pointer;color:var(--tx);font-size:13px;user-select:none;">服务参数（各服务配置）</summary><div style="display:flex;flex-direction:column;gap:2px;margin-top:8px;">' +
+            '<div class="row"><label>Obsidian</label><input type=text data-act="notes.obsidian.vault" placeholder="Vault 名"></div>' +
+            '<div class="row"><label>GitHub Token</label><input type=password data-act="notes.github.token"></div>' +
+            '<div class="row"><label>GitHub Owner</label><input type=text data-act="notes.github.owner"></div>' +
+            '<div class="row"><label>GitHub Repo</label><input type=text data-act="notes.github.repo"></div>' +
+            '<div class="row"><label>GitHub Branch</label><input type=text data-act="notes.github.branch"></div>' +
+            '<div class="row"><label>Gitee Token</label><input type=password data-act="notes.gitee.token"></div>' +
+            '<div class="row"><label>Gitee Owner</label><input type=text data-act="notes.gitee.owner"></div>' +
+            '<div class="row"><label>Gitee Repo</label><input type=text data-act="notes.gitee.repo"></div>' +
+            '<div class="row"><label>Gitee Branch</label><input type=text data-act="notes.gitee.branch"></div>' +
+            '<div class="row"><label>WebDAV 地址</label><input type=text data-act="notes.webdav.url" placeholder="https://dav.example.com"></div>' +
+            '<div class="row"><label>WebDAV 用户名</label><input type=text data-act="notes.webdav.username"></div>' +
+            '<div class="row"><label>WebDAV 密码</label><input type=password data-act="notes.webdav.password"></div>' +
+            '<div class="row"><label class="lbl-top">滴答 API 口令</label><input type=password data-act="notes.dida.token" placeholder="网页版滴答 → 设置 → 账户与安全 → API 口令"></div>' +
+            '<div class="row"><label class="lbl-top">滴答目标清单</label><span style="flex:1;display:flex;align-items:center;gap:6px;"><select id="sel-dida-project" data-act="dida.project" style="flex:1;"><option value="">— 未选择 —</option></select><span class="btn" data-act="dida.refresh">获取清单</span></span></div>' +
+            '<div class="hint">滴答目标清单按文件夹分组；不选则保存到收件箱</div>' +
+            '</div></details>' +
             '<div class="row"><label class="lbl-top">保存路径</label><span style="flex:1;display:flex;flex-direction:column;gap:6px;">' +
             `<span class="path-hint"><b style="width:54px;font-weight:500;color:var(--tx);">记录</b><input type=text data-act="notes.templates.paths.note.path" placeholder="notes/{{title}}.md" class="inp-flex"></span>` +
             `<span class="path-hint"><b style="width:90px;font-weight:500;color:var(--tx);">剪藏/批注/摘抄</b><input type=text data-act="notes.templates.paths.clip.path" placeholder="clips/{{title}}.md" class="inp-flex"></span>` +
@@ -3530,8 +3605,9 @@ textarea:focus{border-color:#6a85ff;box-shadow:0 0 0 2px rgba(106,133,255,.18);}
     });
     renderAiServices(root);
     renderSearchEngines(root);
+    renderSaveServices(root);
     renderPresets(root);
-    if (c.notes.provider === 'dida' && Config.data.notes.dida.token) loadDIDAProjects(root.querySelector('#sel-dida-project'));
+    if (Services.Notes._services().some((s) => s.provider === 'dida') && Config.data.notes.dida.token) loadDIDAProjects(root.querySelector('#sel-dida-project'));
     renderSelectionDefault(root, c.selection.defaultAction);
     let ballKinds = ['global', 'selection'];
     for (let bi = 0; bi < ballKinds.length; bi++) {
@@ -3615,7 +3691,31 @@ textarea:focus{border-color:#6a85ff;box-shadow:0 0 0 2px rgba(106,133,255,.18);}
         '</div>'
       ).join('');
     }
-        function renderPresets(r) {
+        function renderSaveServices(r) {
+      const list = r.querySelector('#save-svc-list');
+      if (!list) return;
+      const svcs = Config.data.notes.services;
+      if (!Array.isArray(svcs)) Config.data.notes.services = [];
+      if (!svcs.length) svcs.push({ name: '默认', provider: Config.data.notes.provider || 'github' });
+      const provName = { obsidian: 'Obsidian', github: 'GitHub', gitee: 'Gitee', webdav: 'WebDAV', dida: '滴答' };
+      list.innerHTML = svcs.map((s) =>
+        '<div class="svc-row list-item">' +
+          '<div class="li-top"><input type=text data-svc="name" value="' + Pure.escHtml(s.name) + '" placeholder="名称">' +
+          '<span class="btn danger" data-svc="remove">删除</span></div>' +
+          '<select class="li-main" data-svc="provider">' +
+            Object.keys(provName).map((k) => '<option value="' + k + '"' + (s.provider === k ? ' selected' : '') + '>' + provName[k] + '</option>').join('') +
+          '</select>' +
+        '</div>'
+      ).join('');
+      const def = r.querySelector('#sel-save-default');
+      if (def) {
+        const cur = Config.data.notes.defaultService;
+        def.innerHTML = svcs.map((s) => '<option value="' + Pure.escHtml(s.name) + '">' + Pure.escHtml(s.name + ' · ' + (provName[s.provider] || s.provider)) + '</option>').join('');
+        def.value = (cur && svcs.some((x) => x.name === cur)) ? cur : (svcs[0] || {}).name || '';
+      }
+    }
+
+    function renderPresets(r) {
       const list = r.querySelector('#preset-list');
       if (!list) return;
       const presets = (Config.data.ai && Array.isArray(Config.data.ai.presets)) ? Config.data.ai.presets : [];
@@ -3672,25 +3772,24 @@ textarea:focus{border-color:#6a85ff;box-shadow:0 0 0 2px rgba(106,133,255,.18);}
       }
     }
 
-    function showSections() {
-      const np = c.notes.provider;
-      root.querySelector('[data-section=obsidian]').style.display = (np === 'obsidian') ? '' : 'none';
-      root.querySelector('[data-section=github]').style.display = (np === 'github') ? '' : 'none';
-      root.querySelector('[data-section=gitee]').style.display = (np === 'gitee') ? '' : 'none';
-      root.querySelector('[data-section=webdav]').style.display = (np === 'webdav') ? '' : 'none';
-      root.querySelector('[data-section=dida]').style.display = (np === 'dida') ? '' : 'none';
-    }
-    showSections();
     // events
     root.addEventListener('change', (ev) => {
       const t = ev.target;
       if (!t.dataset) return;
+      if (t.dataset.svc) {
+        const row = t.closest('.svc-row');
+        const all = root.querySelectorAll('.svc-row');
+        const idx = row ? Array.prototype.indexOf.call(all, row) : -1;
+        const svcs = Config.data.notes.services;
+        if (Array.isArray(svcs) && idx >= 0 && svcs[idx]) {
+          if (t.dataset.svc === 'name') svcs[idx].name = t.value;
+          else if (t.dataset.svc === 'provider') svcs[idx].provider = t.value;
+          renderSaveServices(root);
+        }
+        return;
+      }
       const act = t.dataset.act;
       if (!act) return;
-      if (act === 'notes.provider') {
-        c.notes.provider = getVal('notes.provider') || c.notes.provider;
-        showSections();
-      }
       if (act === 'dida.project') {
         const sel = root.querySelector('#sel-dida-project');
         if (sel) {
@@ -3746,6 +3845,23 @@ textarea:focus{border-color:#6a85ff;box-shadow:0 0 0 2px rgba(106,133,255,.18);}
       }
       if (act === 'dida.refresh') {
         loadDIDAProjects(root.querySelector('#sel-dida-project'));
+        return;
+      }
+      if (act === 'save.add') {
+        const svcs = Config.data.notes.services;
+        if (!Array.isArray(svcs)) Config.data.notes.services = [];
+        if (!svcs.length) svcs.push({ name: '默认', provider: Config.data.notes.provider || 'github' });
+        svcs.push({ name: '服务' + (svcs.length + 1), provider: 'github' });
+        renderSaveServices(root);
+        return;
+      }
+      if (t.dataset.svc === 'remove') {
+        const srow = t.closest('.svc-row');
+        const sall = root.querySelectorAll('.svc-row');
+        const sidx = srow ? Array.prototype.indexOf.call(sall, srow) : -1;
+        const svcs = Config.data.notes.services;
+        if (!Array.isArray(svcs) || svcs.length <= 1) { Toast.show('至少保留一个保存服务'); return; }
+        if (sidx >= 0) { svcs.splice(sidx, 1); renderSaveServices(root); }
         return;
       }
       if (act === 'search.add') {
