@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         orb
 // @namespace    orb-floating
-// @version      2.1.0
+// @version      2.1.2
 // @description  悬浮球:翻页/记录/剪藏/翻译/对话 + 划词批注/划词/对话/搜索
 // @author       orb
 // @match        *://*/*
@@ -723,11 +723,12 @@
   // ============================================================
   const DEFAULT_CONFIG = {
     notes: {
-      provider: 'github',       // 'obsidian' | 'github' | 'gitee' | 'webdav'
+      provider: 'github',       // 'obsidian' | 'github' | 'gitee' | 'webdav' | 'dida'
       obsidian: { vault: '', folder: '' },
       github: { token: '', owner: '', repo: '', branch: 'main', folder: '' },
       gitee: { token: '', owner: '', repo: '', branch: 'master', folder: '' },
       webdav: { url: '', username: '', password: '' },
+      dida: { token: '', projectId: '', projectName: '' },
       templates: {
         frontmatter: '---\nsource: {{url}}\nhost: {{hostname}}\nauthor: {{author}}\ndate: {{date}}\ntype:\n  - "[[剪藏]]"\n---\n\n',
         clipBody: '# {{title}}\n\n{{content}}\n\n',
@@ -744,6 +745,7 @@
       provider: 'edge',         // 'edge' | 'tencent' | 'ali' | 'ai'
       target: 'zh',             // 目标语言 (BCP 47/639-1 代码)
       autoPage: false,          // 页面加载后自动翻译外文内容
+      font: '',                 // 译文固定字体（留空继承页面默认），如 'Georgia, serif'
       aiService: 'OpenAI',      // provider='ai' 时使用的 AI 服务（services[].name）
       aiPrompt: 'You are a professional translation engine. Translate the user message into {{lang}}. Output ONLY the translation, no explanations, no quotes, no code fences.',
     },
@@ -989,6 +991,7 @@
       if (provider === 'github')   return this._saveGitHub(parts, 'github');
       if (provider === 'gitee')    return this._saveGitHub(parts, 'gitee');
       if (provider === 'webdav')   return this._saveWebDAV(parts);
+      if (provider === 'dida')     return this._saveDIDA(parts);
       throw new Error('unknown notes provider: ' + provider);
     },
     async _saveObsidian(parts) {
@@ -1078,6 +1081,24 @@
         throw new Error('WebDAV 写入失败: HTTP ' + r.status + ' ' + ((r.responseText || '').slice(0, 400)));
       }
       return { ok: true, path, via: 'webdav' };
+    },
+    async _saveDIDA(parts) {
+      const p = Config.data.notes.dida;
+      if (!p || !p.token) throw new Error('DIDA: 请先在设置中填写 API 口令');
+      const rendered = this._renderAll(parts);
+      const title = String((parts.vars && parts.vars.title) || '未命名').slice(0, 200);
+      const body = { title, content: rendered.full };
+      if (p.projectId) body.projectId = p.projectId;
+      const r = await GM.request({
+        method: 'POST',
+        url: 'https://api.dida365.com/open/v1/task',
+        headers: { 'Authorization': 'Bearer ' + p.token, 'Content-Type': 'application/json' },
+        data: JSON.stringify(body),
+      });
+      if (r.status < 200 || r.status >= 300) {
+        throw new Error('DIDA 创建任务失败: HTTP ' + r.status + ' ' + ((r.responseText || '').slice(0, 400)));
+      }
+      return { ok: true, path: title, via: 'dida' };
     },
   };
 
@@ -2788,6 +2809,8 @@ textarea:focus{border-color:#6a85ff;box-shadow:0 0 0 2px rgba(106,133,255,.18);}
       if (prev) prev.remove();
       const line = document.createElement('div');
       line.className = 'orb-trans-line';
+      const font = (Config.data.translate && Config.data.translate.font) || '';
+      if (font) line.style.fontFamily = font;   // 译文字体：覆盖页面全局字体
       line.textContent = translation;
       b.appendChild(line);
     },
@@ -3181,7 +3204,7 @@ textarea:focus{border-color:#6a85ff;box-shadow:0 0 0 2px rgba(106,133,255,.18);}
     // 保存目标显示名
     _provName() {
       const p = (Config.data.notes && Config.data.notes.provider) || '';
-      return ({ github: 'GitHub', gitee: 'Gitee', obsidian: 'Obsidian', webdav: 'WebDAV' })[p] || p;
+      return ({ github: 'GitHub', gitee: 'Gitee', obsidian: 'Obsidian', webdav: 'WebDAV', dida: '滴答清单' })[p] || p;
     },
     // 通用执行包装：busy 状态 + 成功/失败反馈（note/annotate 的保存发生在 onSave 回调内，不传 okMsg）
     async _run(id, fn, okMsg) {
@@ -3401,11 +3424,13 @@ textarea:focus{border-color:#6a85ff;box-shadow:0 0 0 2px rgba(106,133,255,.18);}
               '<option value="github">GitHub</option>' +
               '<option value="gitee">Gitee</option>' +
               '<option value="webdav">WebDAV</option>' +
+              '<option value="dida">滴答清单 (DIDA)</option>' +
             '</select></div>' +
             '<div data-section="obsidian"><div class="row"><label>Vault</label><input type=text data-act="notes.obsidian.vault"></div></div>' +
             '<div data-section="github"><div class="row"><label>Token</label><input type=password data-act="notes.github.token"></div><div class="row"><label>Owner</label><input type=text data-act="notes.github.owner"></div><div class="row"><label>Repo</label><input type=text data-act="notes.github.repo"></div><div class="row"><label>Branch</label><input type=text data-act="notes.github.branch"></div></div>' +
             '<div data-section="gitee"><div class="row"><label>Token</label><input type=password data-act="notes.gitee.token"></div><div class="row"><label>Owner</label><input type=text data-act="notes.gitee.owner"></div><div class="row"><label>Repo</label><input type=text data-act="notes.gitee.repo"></div><div class="row"><label>Branch</label><input type=text data-act="notes.gitee.branch"></div></div>' +
             '<div data-section="webdav"><div class="row"><label>地址</label><input type=text data-act="notes.webdav.url" placeholder="https://dav.example.com"></div><div class="row"><label>用户名</label><input type=text data-act="notes.webdav.username"></div><div class="row"><label>密码</label><input type=password data-act="notes.webdav.password"></div></div>' +
+            '<div data-section="dida"><div class="row"><label class="lbl-top">API 口令</label><input type=password data-act="notes.dida.token" placeholder="网页版滴答清单 → 设置 → 账户与安全 → API 口令"></div><div class="row"><label class="lbl-top">目标清单</label><span style="flex:1;display:flex;align-items:center;gap:6px;"><select id="sel-dida-project" data-act="dida.project" style="flex:1;"><option value="">— 未选择 —</option></select><span class="btn" data-act="dida.refresh">获取清单</span></span></div><div class="hint">选择目标清单（按文件夹分组）；不选则保存到收件箱</div></div>' +
             '<div class="row"><label class="lbl-top">保存路径</label><span style="flex:1;display:flex;flex-direction:column;gap:6px;">' +
             `<span class="path-hint"><b style="width:54px;font-weight:500;color:var(--tx);">记录</b><input type=text data-act="notes.templates.paths.note.path" placeholder="notes/{{title}}.md" class="inp-flex"></span>` +
             `<span class="path-hint"><b style="width:90px;font-weight:500;color:var(--tx);">剪藏/批注/摘抄</b><input type=text data-act="notes.templates.paths.clip.path" placeholder="clips/{{title}}.md" class="inp-flex"></span>` +
@@ -3445,6 +3470,7 @@ textarea:focus{border-color:#6a85ff;box-shadow:0 0 0 2px rgba(106,133,255,.18);}
               '<option value="tr">Türkçe</option>' +
             '</select></div>' +
             '<div class="row"><label>自动翻译</label><input type=checkbox data-act="translate.autoPage"><span class="hint">页面加载后自动翻译外文内容</span></div>' +
+            '<div class="row"><label>译文字体</label><input type=text data-act="translate.font" placeholder="留空继承页面默认"><span class="hint">译文固定字体，如 Georgia, serif</span></div>' +
             '<div class="row"><label>AI 服务</label><select data-act="translate.aiService" id="sel-translate-ai"></select><span class="hint">选择 AI 翻译使用的服务与模型</span></div>' +
             '<div class="row"><label class="lbl-top">AI 提示词</label><textarea data-act="translate.aiPrompt"></textarea></div>' +
             '<div class="hint">AI 翻译时 {{langName}} 替换为目标语言</div>' +
@@ -3505,6 +3531,7 @@ textarea:focus{border-color:#6a85ff;box-shadow:0 0 0 2px rgba(106,133,255,.18);}
     renderAiServices(root);
     renderSearchEngines(root);
     renderPresets(root);
+    if (c.notes.provider === 'dida' && Config.data.notes.dida.token) loadDIDAProjects(root.querySelector('#sel-dida-project'));
     renderSelectionDefault(root, c.selection.defaultAction);
     let ballKinds = ['global', 'selection'];
     for (let bi = 0; bi < ballKinds.length; bi++) {
@@ -3617,12 +3644,41 @@ textarea:focus{border-color:#6a85ff;box-shadow:0 0 0 2px rgba(106,133,255,.18);}
       sel.value = String(cur == null ? '' : cur);
     }
 
+    async function loadDIDAProjects(sel) {
+      const p = Config.data.notes.dida;
+      if (!p || !p.token) { Toast.show('请先填写 API 口令', 2500, 'error'); return; }
+      if (!sel) return;
+      Toast.show('获取清单中…', 1200);
+      try {
+        const h = { 'Authorization': 'Bearer ' + p.token, 'Accept': 'application/json' };
+        const [rp, rg] = await Promise.all([
+          GM.request({ method: 'GET', url: 'https://api.dida365.com/open/v1/project', headers: h }),
+          GM.request({ method: 'GET', url: 'https://api.dida365.com/open/v1/project/group', headers: h }),
+        ]);
+        const ok = (r) => { if (r.status < 200 || r.status >= 300) throw new Error('HTTP ' + r.status + ' ' + String(r.responseText || '').slice(0, 300)); return JSON.parse(r.responseText || '[]'); };
+        const plist = ok(rp), glist = ok(rg);
+        const gmap = {};
+        (glist || []).forEach((g) => { if (g && g.id) gmap[g.id] = g.name || ''; });
+        const opts = (plist || []).map((pr) => {
+          const g = (pr.groupId && gmap[pr.groupId]) || '';
+          return { id: pr.id, name: (g ? g + ' / ' : '') + (pr.name || pr.id) };
+        });
+        opts.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+        sel.innerHTML = '<option value="">— 未选择 —</option>' + opts.map((o) => '<option value="' + Pure.escHtml(o.id) + '">' + Pure.escHtml(o.name) + '</option>').join('');
+        if (p.projectId && opts.some((o) => o.id === p.projectId)) sel.value = p.projectId;
+        if (opts.length === 0) Toast.show('未找到清单，请先在滴答中创建', 3000);
+      } catch (e) {
+        Toast.show('获取清单失败: ' + (e.message || e), 3500, 'error');
+      }
+    }
+
     function showSections() {
       const np = c.notes.provider;
       root.querySelector('[data-section=obsidian]').style.display = (np === 'obsidian') ? '' : 'none';
       root.querySelector('[data-section=github]').style.display = (np === 'github') ? '' : 'none';
       root.querySelector('[data-section=gitee]').style.display = (np === 'gitee') ? '' : 'none';
       root.querySelector('[data-section=webdav]').style.display = (np === 'webdav') ? '' : 'none';
+      root.querySelector('[data-section=dida]').style.display = (np === 'dida') ? '' : 'none';
     }
     showSections();
     // events
@@ -3634,6 +3690,14 @@ textarea:focus{border-color:#6a85ff;box-shadow:0 0 0 2px rgba(106,133,255,.18);}
       if (act === 'notes.provider') {
         c.notes.provider = getVal('notes.provider') || c.notes.provider;
         showSections();
+      }
+      if (act === 'dida.project') {
+        const sel = root.querySelector('#sel-dida-project');
+        if (sel) {
+          c.notes.dida.projectId = sel.value;
+          const opt = sel.selectedOptions && sel.selectedOptions[0];
+          c.notes.dida.projectName = opt ? opt.textContent.trim() : '';
+        }
       }
     });
     root.addEventListener('click', (ev) => {
@@ -3678,6 +3742,10 @@ textarea:focus{border-color:#6a85ff;box-shadow:0 0 0 2px rgba(106,133,255,.18);}
         const engs = Config.data.search && Config.data.search.engines;
         if (Array.isArray(engs) && engs.length <= 1) { Toast.show('至少保留一个搜索引擎'); return; }
         if (idx >= 0 && Array.isArray(engs)) { engs.splice(idx, 1); renderSearchEngines(root); }
+        return;
+      }
+      if (act === 'dida.refresh') {
+        loadDIDAProjects(root.querySelector('#sel-dida-project'));
         return;
       }
       if (act === 'search.add') {
