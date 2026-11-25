@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         orb
 // @namespace    orb-floating
-// @version      2.1.6
+// @version      2.1.7
 // @description  悬浮球:翻页/记录/剪藏/翻译/对话 + 划词批注/划词/对话/搜索
 // @author       orb
 // @match        *://*/*
@@ -729,7 +729,7 @@
       gitee: { token: '', owner: '', repo: '', branch: 'master', folder: '' },
       webdav: { url: '', username: '', password: '' },
       dida: { token: '', projectId: '', projectName: '' },
-      siyuan: { url: 'http://127.0.0.1:6806', token: '', notebook: '', notebookName: '' },
+      siyuan: { url: 'http://127.0.0.1:6806', token: '', notebook: '' },
       templates: {
         frontmatter: '---\nsource: {{url}}\nhost: {{hostname}}\nauthor: {{author}}\ndate: {{date}}\ntype:\n  - "[[剪藏]]"\n---\n\n',
         clipBody: '# {{title}}\n\n{{content}}\n\n',
@@ -1119,7 +1119,8 @@
     async _saveSiYuan(parts) {
       const p = Config.data.notes.siyuan;
       if (!p || !p.token) throw new Error('思源笔记: 请先在设置中填写 API Token');
-      if (!p.notebook) throw new Error('思源笔记: 请先选择目标笔记本');
+      const rawNb = String(p.notebook || '').trim();
+      if (!rawNb) throw new Error('思源笔记: 请先填写目标笔记本（名称或 ID）');
       const base = String(p.url || 'http://127.0.0.1:6806').replace(/\/+$/, '');
       const headers = { 'Authorization': 'Token ' + p.token, 'Content-Type': 'application/json' };
       const call = async (path, body) => {
@@ -1130,13 +1131,19 @@
         if (j.code !== 0) throw new Error('思源笔记: ' + (j.msg || ('code ' + j.code)));
         return j.data;
       };
+      // 目标笔记本：支持填 ID 或名称（名称需向思源解析为 id）
+      const nbData = await call('/notebook/lsNotebooks', {});
+      const nbs = ((nbData && nbData.notebooks) || []).filter((n) => n && !n.closed);
+      const hit = nbs.find((n) => n && n.id === rawNb) || nbs.find((n) => n && String(n.name || '').trim() === rawNb);
+      if (!hit) throw new Error('思源笔记: 未找到笔记本「' + rawNb + '」');
+      const notebookId = hit.id;
       const rel = this._path(parts.vars.title, parts.action).replace(/\.md$/i, '');
       const hpath = '/' + rel.replace(/^\/+/, '');
       const rendered = this._renderAll(parts);
       // 1) 查同路径文档（旧版本无此接口时忽略，走新建）
       let docId = '';
       try {
-        const ids = await call('/filetree/getIDsByHPath', { notebook: p.notebook, path: hpath });
+        const ids = await call('/filetree/getIDsByHPath', { notebook: notebookId, path: hpath });
         if (Array.isArray(ids) && ids.length) docId = ids[0];
       } catch (e) { /* ignore */ }
       // 2) 已存在 → 追加；否则新建
@@ -1145,11 +1152,11 @@
         return { ok: true, path: hpath, appended: true, via: 'siyuan' };
       }
       try {
-        const newId = await call('/filetree/createDocWithMd', { notebook: p.notebook, path: hpath, markdown: rendered.full });
+        const newId = await call('/filetree/createDocWithMd', { notebook: notebookId, path: hpath, markdown: rendered.full });
         return { ok: true, path: hpath, created: true, id: newId, via: 'siyuan' };
       } catch (e) {
         // 同名已存在（duplicated）：再查一次并追加
-        const ids2 = await call('/filetree/getIDsByHPath', { notebook: p.notebook, path: hpath });
+        const ids2 = await call('/filetree/getIDsByHPath', { notebook: notebookId, path: hpath });
         if (Array.isArray(ids2) && ids2.length) {
           await call('/block/appendBlock', { dataType: 'markdown', data: rendered.body + '\n', parentID: ids2[0] });
           return { ok: true, path: hpath, appended: true, via: 'siyuan' };
@@ -3536,7 +3543,7 @@ textarea:focus{border-color:#6a85ff;box-shadow:0 0 0 2px rgba(106,133,255,.18);}
             '<div data-section="github"><div class="row"><label>Token</label><input type=password data-act="notes.github.token"></div><div class="row"><label>Owner</label><input type=text data-act="notes.github.owner"></div><div class="row"><label>Repo</label><input type=text data-act="notes.github.repo"></div><div class="row"><label>Branch</label><input type=text data-act="notes.github.branch"></div></div>' +
             '<div data-section="gitee"><div class="row"><label>Token</label><input type=password data-act="notes.gitee.token"></div><div class="row"><label>Owner</label><input type=text data-act="notes.gitee.owner"></div><div class="row"><label>Repo</label><input type=text data-act="notes.gitee.repo"></div><div class="row"><label>Branch</label><input type=text data-act="notes.gitee.branch"></div></div>' +
             '<div data-section="webdav"><div class="row"><label>地址</label><input type=text data-act="notes.webdav.url" placeholder="https://dav.example.com"></div><div class="row"><label>用户名</label><input type=text data-act="notes.webdav.username"></div><div class="row"><label>密码</label><input type=password data-act="notes.webdav.password"></div></div>' +
-            '<div data-section="siyuan"><div class="row"><label>API 地址</label><input type=text data-act="notes.siyuan.url" placeholder="http://127.0.0.1:6806"></div><div class="row"><label class="lbl-top">API Token</label><input type=password data-act="notes.siyuan.token" placeholder="思源 → 设置 → 关于 → API token"></div><div class="row"><label class="lbl-top">目标笔记本</label><span style="flex:1;display:flex;align-items:center;gap:6px;"><select id="sel-siyuan-notebook" data-act="siyuan.notebook" style="flex:1;"><option value="">— 未选择 —</option></select><span class="btn" data-act="siyuan.refresh">获取笔记本</span></span></div><div class="hint">思源需开启网络伺服；手机端请填电脑局域网地址（如 http://192.168.1.5:6806）</div></div>' +
+            '<div data-section="siyuan"><div class="row"><label>API 地址</label><input type=text data-act="notes.siyuan.url" placeholder="http://127.0.0.1:6806"></div><div class="row"><label class="lbl-top">API Token</label><input type=password data-act="notes.siyuan.token" placeholder="思源 → 设置 → 关于 → API token"></div><div class="row"><label>目标笔记本</label><input type=text data-act="notes.siyuan.notebook" placeholder="笔记本名称或 ID"></div><div class="hint">直接填笔记本名称即可；手机端请把 API 地址填为电脑局域网地址</div></div>' +
             '<div data-section="dida"><div class="row"><label class="lbl-top">API 口令</label><input type=password data-act="notes.dida.token" placeholder="网页版滴答清单 → 设置 → 账户与安全 → API 口令"></div><div class="row"><label class="lbl-top">目标清单</label><span style="flex:1;display:flex;align-items:center;gap:6px;"><select id="sel-dida-project" data-act="dida.project" style="flex:1;"><option value="">— 未选择 —</option></select><span class="btn" data-act="dida.refresh">获取清单</span></span></div><div class="hint">选择目标清单（按文件夹分组）；不选则保存到收件箱</div></div>' +
             
             '<div class="row"><label class="lbl-top">保存路径</label><span style="flex:1;display:flex;flex-direction:column;gap:6px;">' +
@@ -3640,7 +3647,6 @@ textarea:focus{border-color:#6a85ff;box-shadow:0 0 0 2px rgba(106,133,255,.18);}
     renderSearchEngines(root);
     renderPresets(root);
     if (Config.data.notes.provider === 'dida' && Config.data.notes.dida.token) loadDIDAProjects(root.querySelector('#sel-dida-project'));
-    if (Config.data.notes.provider === 'siyuan' && Config.data.notes.siyuan.token) loadSiYuanNotebooks(root.querySelector('#sel-siyuan-notebook'));
     renderSelectionDefault(root, c.selection.defaultAction);
     let ballKinds = ['global', 'selection'];
     for (let bi = 0; bi < ballKinds.length; bi++) {
@@ -3792,31 +3798,6 @@ textarea:focus{border-color:#6a85ff;box-shadow:0 0 0 2px rgba(106,133,255,.18);}
       }
     }
 
-    async function loadSiYuanNotebooks(sel) {
-      const p = Config.data.notes.siyuan;
-      if (!p || !p.token) { Toast.show('请先填写 API Token', 2500, 'error'); return; }
-      if (!sel) return;
-      Toast.show('获取笔记本中…', 1200);
-      try {
-        const base = String(p.url || 'http://127.0.0.1:6806').replace(/\/+$/, '');
-        const r = await GM.request({
-          method: 'POST',
-          url: base + '/api/notebook/lsNotebooks',
-          headers: { 'Authorization': 'Token ' + p.token, 'Content-Type': 'application/json' },
-          data: '{}',
-        });
-        if (r.status < 200 || r.status >= 300) throw new Error('HTTP ' + r.status);
-        const j = JSON.parse(r.responseText || '{}');
-        if (j.code !== 0) throw new Error(j.msg || ('code ' + j.code));
-        const nbs = ((j.data && j.data.notebooks) || []).filter((n) => !n.closed);
-        sel.innerHTML = '<option value="">— 未选择 —</option>' + nbs.map((n) => '<option value="' + Pure.escHtml(n.id) + '">' + Pure.escHtml(n.name || n.id) + '</option>').join('');
-        if (p.notebook && nbs.some((n) => n.id === p.notebook)) sel.value = p.notebook;
-        if (!nbs.length) Toast.show('未找到笔记本，请先在思源中创建', 3000);
-      } catch (e) {
-        Toast.show('获取笔记本失败: ' + (e.message || e), 3500, 'error');
-      }
-    }
-
     // events
     root.addEventListener('change', (ev) => {
       const t = ev.target;
@@ -3826,14 +3807,6 @@ textarea:focus{border-color:#6a85ff;box-shadow:0 0 0 2px rgba(106,133,255,.18);}
       if (act === 'notes.provider') {
         c.notes.provider = getVal('notes.provider') || c.notes.provider;
         showSections();
-      }
-      if (act === 'siyuan.notebook') {
-        const sel = root.querySelector('#sel-siyuan-notebook');
-        if (sel) {
-          c.notes.siyuan.notebook = sel.value;
-          const opt = sel.selectedOptions && sel.selectedOptions[0];
-          c.notes.siyuan.notebookName = opt ? opt.textContent.trim() : '';
-        }
       }
       if (act === 'dida.project') {
         const sel = root.querySelector('#sel-dida-project');
@@ -3887,10 +3860,6 @@ textarea:focus{border-color:#6a85ff;box-shadow:0 0 0 2px rgba(106,133,255,.18);}
         const engs = Config.data.search && Config.data.search.engines;
         if (Array.isArray(engs) && engs.length <= 1) { Toast.show('至少保留一个搜索引擎'); return; }
         if (idx >= 0 && Array.isArray(engs)) { engs.splice(idx, 1); renderSearchEngines(root); }
-        return;
-      }
-      if (act === 'siyuan.refresh') {
-        loadSiYuanNotebooks(root.querySelector('#sel-siyuan-notebook'));
         return;
       }
       if (act === 'dida.refresh') {
